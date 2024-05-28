@@ -121,6 +121,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			i = j
 		}
 		f.Close()
+		CallCompleteTask([]string{}, resp.TaskNumber)
 		log.Printf("reduce task %d finishes; generate output file %s", resp.TaskNumber, outputFileName)
 	}
 }
