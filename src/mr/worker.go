@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 )
 
 // Map functions return a slice of KeyValue.
@@ -33,25 +34,24 @@ func Worker(mapf func(string, string) []KeyValue,
 		log.Fatalf("can't get a task from the coordinator through RPC; err = %s\n", err)
 	}
 
-	f, err := os.Open(resp.FileName)
-	if err != nil {
-		log.Fatalf("can't open input file; err = %s\n", err)
-	}
-
-	content, err := io.ReadAll(f)
-	if err != nil {
-		log.Fatalf("can't issue IO request to read input file; err = %s\n", err)
-	}
-
-	// close input file after function returns
-	f.Close()
-
 	if resp.JobType == "map" {
+		f, err := os.Open(resp.Files[0])
+		if err != nil {
+			log.Fatalf("can't open input file; err = %s\n", err)
+		}
+
+		content, err := io.ReadAll(f)
+		if err != nil {
+			log.Fatalf("can't issue IO request to read input file; err = %s\n", err)
+		}
+
+		// close input file after function returns
+		f.Close()
 		taskNumber := resp.TaskNumber
 		numOfReduceTasks := resp.NumOfReduceTasks
 
 		log.Printf("start map worker %d\n", taskNumber)
-		keyValuePairs := mapf(resp.FileName, string(content))
+		keyValuePairs := mapf(resp.Files[0], string(content))
 
 		log.Print("start partitioning key\n")
 		partition := map[int][]KeyValue{}
@@ -79,6 +79,46 @@ func Worker(mapf func(string, string) []KeyValue,
 		CallCompleteTask(outputFiles, taskNumber)
 		log.Println("worker complete task", taskNumber)
 	}
+
+	if resp.JobType == "reduce" {
+		log.Println("start reduce worker, task_number=", resp.TaskNumber)
+		files := resp.Files
+		intermediate := []KeyValue{}
+		for _, file := range files {
+			f, err := os.Open(file)
+			if err != nil {
+				log.Fatal("can't open file %s", file)
+			}
+			dec := json.NewDecoder(f)
+			for {
+				var kv KeyValue
+				if err := dec.Decode(&kv); err != nil {
+					break
+				}
+				intermediate = append(intermediate, kv)
+			}
+			f.Close()
+		}
+		sort.Sort(ByKey(intermediate))
+		outputFileName := fmt.Sprintf("mr-out-%d", resp.TaskNumber)
+		f, err := os.OpenFile(outputFileName, os.O_RDWR|os.O_CREATE, 0644)
+		if err != nil {
+			log.Fatalf("can't create file for reduce task %d", resp.TaskNumber)
+		}
+		for i := 0; i < len(intermediate); i++ {
+			j := i
+			values := []string{}
+			for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+				values = append(values, intermediate[j].Value)
+				j += 1
+			}
+			output := reducef(intermediate[i].Key, values)
+			fmt.Fprintf(f, "%v %v\n", intermediate[i].Key, output)
+			i = j
+		}
+		f.Close()
+		log.Printf("reduce task %d finishes; generate output file %s", resp.TaskNumber, outputFileName)
+	}
 }
 
 type Args struct {
@@ -87,7 +127,7 @@ type Args struct {
 }
 
 type Reply struct {
-	FileName         string
+	Files            []string
 	JobType          string
 	TaskNumber       int
 	NumOfReduceTasks int

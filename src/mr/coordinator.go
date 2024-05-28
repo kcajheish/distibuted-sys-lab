@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,7 @@ type Coordinator struct {
 	NumOfReduceTasks int
 	NumOfMapTasks    int
 	Partitions       SafeMap
+	Counter          SafeCounter
 }
 
 const MAP = 0
@@ -31,7 +33,7 @@ const COMPLETED = 2
 
 type Task struct {
 	TaskNumber int
-	FileName   string
+	Files      []string
 	JobType    int
 	Status     int
 	UnixTime   int64
@@ -39,10 +41,31 @@ type Task struct {
 }
 
 func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
+	c.Counter.Lock()
+	for c.IdleQ.Len() == 0 && c.Counter.Count < c.NumOfMapTasks {
+		c.Counter.Wait()
+	}
+	if c.IdleQ.Len() == 0 && c.Counter.Count == c.NumOfMapTasks {
+		number := c.NumOfMapTasks
+		for p := 0; p < c.NumOfMapTasks; p++ {
+			files := c.Partitions.Read(p)
+			reduceTask := &Task{
+				TaskNumber: number,
+				Files:      files,
+				JobType:    REDUCE,
+				Status:     IDLE,
+				UnixTime:   time.Now().UnixMicro(),
+				index:      p,
+			}
+			heap.Push(&c.IdleQ, reduceTask)
+		}
+	}
+	c.Counter.Unlock()
+
 	task := heap.Pop(&c.IdleQ).(*Task)
 	task.UnixTime = time.Now().UnixMicro()
 	c.ProcessPQ.Push(task)
-	reply.FileName = task.FileName
+	reply.Files = task.Files
 	if task.JobType == MAP {
 		reply.JobType = "map"
 	} else {
@@ -62,6 +85,7 @@ func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteRepl
 		}
 		c.Partitions.Append(partitionNumber, file)
 	}
+	c.Counter.Count += 1
 	reply.Status = "success"
 	log.Println(c.Partitions.partitions)
 	log.Printf("map task %d finishes", args.TaskNumber)
@@ -97,7 +121,7 @@ func (c *Coordinator) initTasks(files []string) {
 			TaskNumber: i,
 			Status:     IDLE,
 			JobType:    MAP,
-			FileName:   file,
+			Files:      []string{file},
 			UnixTime:   time.Now().UnixMicro(), // unix time in micro seconds
 		}
 		c.Tasks = append(c.Tasks, task)
@@ -126,6 +150,10 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		NumOfMapTasks:    len(files),
 		Partitions: SafeMap{
 			partitions: make(map[int][]string, 0),
+		},
+		Counter: SafeCounter{
+			Count: 0,
+			Cond:  sync.NewCond(&sync.Mutex{}),
 		},
 	}
 	log.Println("init task queue")

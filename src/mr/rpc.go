@@ -31,7 +31,7 @@ type TaskArg struct {
 }
 
 type TaskReply struct {
-	FileName         string
+	Files            []string
 	JobType          string
 	NumOfReduceTasks int
 	TaskNumber       int
