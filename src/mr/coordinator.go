@@ -1,16 +1,22 @@
 package mr
 
 import (
+	"container/heap"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
+	"time"
 )
 
 type Coordinator struct {
 	// Your definitions here.
-	Tasks []Task
+	Tasks            []Task
+	IdleQ            PriorityQueue
+	ProcessPQ        PriorityQueue
+	NumOfReduceTasks int
+	NumOfMapTasks    int
 }
 
 const MAP = 0
@@ -23,24 +29,24 @@ const COMPLETED = 2
 type Task struct {
 	TaskNumber int
 	FileName   string
-	JobType    string
+	JobType    int
 	Status     int
+	UnixTime   int64
+	index      int // position at the priority queue
 }
 
-// Your code here -- RPC handlers for the worker to call.
-func (c *Coordinator) MapTask(args MapTaskArg, reply *MapTaskReply) error {
-	// reply.FileName = "pg-grimm.txt"
-	// reply.JobType = "map"
-	// reply.TaskNumber = 1
-	// reply.NumOfReduceTasks = 10
-	return nil
-}
-
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
+	task := heap.Pop(&c.IdleQ).(*Task)
+	task.UnixTime = time.Now().UnixMicro()
+	c.ProcessPQ.Push(task)
+	reply.FileName = task.FileName
+	if task.JobType == MAP {
+		reply.JobType = "map"
+	} else {
+		reply.JobType = "reduce"
+	}
+	reply.TaskNumber = task.TaskNumber
+	reply.NumOfReduceTasks = c.NumOfReduceTasks
 	return nil
 }
 
@@ -61,23 +67,53 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := true
-	for _, task := range c.Tasks {
-		if task.Status != COMPLETED {
-			ret = false
-			break
+	a := c.IdleQ.Len()
+	b := c.ProcessPQ.Len()
+	return a+b == 0
+}
+
+func (c *Coordinator) initTasks(files []string) {
+	c.Tasks = make([]Task, 0, c.NumOfMapTasks+c.NumOfReduceTasks)
+	for i, file := range files {
+		task := Task{
+			TaskNumber: i,
+			Status:     IDLE,
+			JobType:    MAP,
+			FileName:   file,
+			UnixTime:   time.Now().UnixMicro(), // unix time in micro seconds
 		}
+		c.Tasks = append(c.Tasks, task)
 	}
-	return ret
+}
+
+func (c *Coordinator) initIdleQueue() {
+	c.IdleQ = PriorityQueue{}
+	c.IdleQ.tasks = make([]*Task, 0, c.NumOfMapTasks+c.NumOfReduceTasks)
+	for _, task := range c.Tasks {
+		c.IdleQ.Push(&task)
+	}
+}
+
+func (c *Coordinator) initProcessQueue() {
+	c.ProcessPQ = PriorityQueue{}
+	c.ProcessPQ.tasks = make([]*Task, 0, c.NumOfMapTasks+c.NumOfReduceTasks)
 }
 
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
-
-	// Your code here.
+	c := Coordinator{
+		NumOfReduceTasks: nReduce,
+		NumOfMapTasks:    len(files),
+	}
+	log.Println("init task queue")
+	c.initTasks(files)
+	log.Println("init idle queue")
+	c.initIdleQueue()
+	log.Println("init process queue")
+	c.initProcessQueue()
+	log.Println("run coordinator server")
 	c.server()
 	return &c
 }

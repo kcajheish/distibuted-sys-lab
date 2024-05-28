@@ -61,7 +61,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			partition[partitionNumber] = append(partition[partitionNumber], kv)
 		}
 
-		fmt.Print("start writing intermediate key/value into output partition files\n")
+		log.Println("start writing intermediate key/value into output partition files")
 		for partitionNumber, kvPairs := range partition {
 			outputFileName := fmt.Sprintf("mr-out-%d-%d", taskNumber, partitionNumber)
 			f, err := os.OpenFile(outputFileName, os.O_RDWR|os.O_CREATE, 0644)
@@ -74,13 +74,14 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			f.Close()
 		}
-
+		log.Println("worker complete task", taskNumber)
 	}
 }
 
 type Args struct {
-	WorkerId int
+	WorkerID int
 }
+
 type Reply struct {
 	FileName         string
 	JobType          string
@@ -89,9 +90,11 @@ type Reply struct {
 }
 
 func CallTask() (Reply, error) {
-	args := Args{}
+	args := Args{
+		WorkerID: -1,
+	}
 	reply := Reply{}
-	ok := call("Coordinator.MapTask", &args, &reply)
+	ok := call("Coordinator.GetTask", &args, &reply)
 	if !ok {
 		return reply, fmt.Errorf("failed")
 	} else {
