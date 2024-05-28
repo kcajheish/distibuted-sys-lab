@@ -80,4 +80,5 @@ func (pq *PriorityQueue) Done(task *Task) {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
 	heap.Fix(pq, task.index)
+	heap.Pop(pq)
 }

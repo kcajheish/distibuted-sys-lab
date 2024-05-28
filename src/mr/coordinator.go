@@ -54,7 +54,7 @@ func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
 		number := c.NumOfMapTasks
 		for p := 0; p < c.NumOfMapTasks; p++ {
 			files := c.Partitions.Read(p)
-			reduceTask := &Task{
+			reduceTask := Task{
 				TaskNumber: number,
 				Files:      files,
 				JobType:    REDUCE,
@@ -62,7 +62,8 @@ func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
 				UnixTime:   time.Now().UnixMicro(),
 				index:      p,
 			}
-			heap.Push(&c.IdleQ, reduceTask)
+			heap.Push(&c.IdleQ, &reduceTask)
+			c.Tasks = append(c.Tasks, reduceTask)
 		}
 	}
 	c.Counter.Unlock()
@@ -96,6 +97,8 @@ func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteRepl
 		c.Counter.Broadcast()
 	}
 	c.Counter.Unlock()
+	completedTask := c.Tasks[args.TaskNumber]
+	c.ProcessPQ.Done(&completedTask)
 	reply.Status = "success"
 	log.Println(c.Partitions.partitions)
 	log.Printf("map task %d finishes", args.TaskNumber)
