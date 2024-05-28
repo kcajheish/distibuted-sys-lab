@@ -62,6 +62,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 
 		log.Println("start writing intermediate key/value into output partition files")
+		outputFiles := make([]string, 0)
 		for partitionNumber, kvPairs := range partition {
 			outputFileName := fmt.Sprintf("mr-out-%d-%d", taskNumber, partitionNumber)
 			f, err := os.OpenFile(outputFileName, os.O_RDWR|os.O_CREATE, 0644)
@@ -73,13 +74,16 @@ func Worker(mapf func(string, string) []KeyValue,
 				encoder.Encode(&kv)
 			}
 			f.Close()
+			outputFiles = append(outputFiles, outputFileName)
 		}
+		CallCompleteTask(outputFiles, taskNumber)
 		log.Println("worker complete task", taskNumber)
 	}
 }
 
 type Args struct {
-	WorkerID int
+	TaskNumber  int
+	OutputFiles []string
 }
 
 type Reply struct {
@@ -90,9 +94,7 @@ type Reply struct {
 }
 
 func CallTask() (Reply, error) {
-	args := Args{
-		WorkerID: -1,
-	}
+	args := Args{}
 	reply := Reply{}
 	ok := call("Coordinator.GetTask", &args, &reply)
 	if !ok {
@@ -101,6 +103,20 @@ func CallTask() (Reply, error) {
 		return reply, nil
 	}
 
+}
+
+func CallCompleteTask(outputFiles []string, taskNumber int) (Reply, error) {
+	args := Args{
+		OutputFiles: outputFiles,
+		TaskNumber:  taskNumber,
+	}
+	reply := Reply{}
+	ok := call("Coordinator.CompleteTask", &args, &reply)
+	if !ok {
+		return reply, fmt.Errorf("task_number=%d, output_file=%s failed to notify coordinator", taskNumber)
+	} else {
+		return reply, nil
+	}
 }
 
 // example function to show how to make an RPC call to the coordinator.

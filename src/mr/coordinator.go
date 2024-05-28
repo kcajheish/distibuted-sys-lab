@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -17,6 +19,7 @@ type Coordinator struct {
 	ProcessPQ        PriorityQueue
 	NumOfReduceTasks int
 	NumOfMapTasks    int
+	Partitions       SafeMap
 }
 
 const MAP = 0
@@ -47,6 +50,21 @@ func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
 	}
 	reply.TaskNumber = task.TaskNumber
 	reply.NumOfReduceTasks = c.NumOfReduceTasks
+	return nil
+}
+
+func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteReply) error {
+	for _, file := range args.OutputFiles {
+		words := strings.Split(file, "-")
+		partitionNumber, err := strconv.Atoi(words[3]) // mr-out-<map number>-<partition number>
+		if err != nil {
+			log.Fatal("can't convert %s to partition number", partitionNumber)
+		}
+		c.Partitions.Append(partitionNumber, file)
+	}
+	reply.Status = "success"
+	log.Println(c.Partitions.partitions)
+	log.Printf("map task %d finishes", args.TaskNumber)
 	return nil
 }
 
@@ -106,6 +124,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		NumOfReduceTasks: nReduce,
 		NumOfMapTasks:    len(files),
+		Partitions: SafeMap{
+			partitions: make(map[int][]string, 0),
+		},
 	}
 	log.Println("init task queue")
 	c.initTasks(files)
