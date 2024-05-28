@@ -34,6 +34,10 @@ func Worker(mapf func(string, string) []KeyValue,
 		log.Fatalf("can't get a task from the coordinator through RPC; err = %s\n", err)
 	}
 
+	if resp.JobType == "exit" {
+		return
+	}
+
 	if resp.JobType == "map" {
 		f, err := os.Open(resp.Files[0])
 		if err != nil {

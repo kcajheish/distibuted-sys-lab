@@ -41,6 +41,11 @@ type Task struct {
 }
 
 func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
+	if c.ProcessPQ.Len() == 0 && c.Counter.Count == c.NumOfMapTasks+c.NumOfReduceTasks {
+		reply.JobType = "exit"
+		return nil
+	}
+
 	c.Counter.Lock()
 	for c.IdleQ.Len() == 0 && c.Counter.Count < c.NumOfMapTasks {
 		c.Counter.Wait()
