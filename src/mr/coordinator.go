@@ -85,7 +85,12 @@ func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteRepl
 		}
 		c.Partitions.Append(partitionNumber, file)
 	}
+	c.Counter.Lock()
 	c.Counter.Count += 1
+	if c.Counter.Count == c.NumOfMapTasks {
+		c.Counter.Broadcast()
+	}
+	c.Counter.Unlock()
 	reply.Status = "success"
 	log.Println(c.Partitions.partitions)
 	log.Printf("map task %d finishes", args.TaskNumber)

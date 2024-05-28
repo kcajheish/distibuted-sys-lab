@@ -18,3 +18,7 @@ func (sc *SafeCounter) Wait() {
 func (sc *SafeCounter) Unlock() {
 	sc.Cond.L.Unlock()
 }
+
+func (sc *SafeCounter) Broadcast() {
+	sc.Cond.Broadcast()
+}
