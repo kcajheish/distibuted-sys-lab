@@ -69,7 +69,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		outputFiles := make([]string, 0)
 		for partitionNumber, kvPairs := range partition {
 			outputFileName := fmt.Sprintf("mr-out-%d-%d", taskNumber, partitionNumber)
-			f, err := os.OpenFile(outputFileName, os.O_RDWR|os.O_CREATE, 0644)
+			f, err := os.CreateTemp("", "temp-map")
 			if err != nil {
 				log.Fatalf("can't establish IO to file %s; err = %s\n", outputFileName, err)
 			}
@@ -78,6 +78,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				encoder.Encode(&kv)
 			}
 			f.Close()
+			os.Rename(f.Name(), outputFileName)
 			outputFiles = append(outputFiles, outputFileName)
 		}
 		CallCompleteTask(outputFiles, taskNumber)
@@ -105,7 +106,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 		sort.Sort(ByKey(intermediate))
 		outputFileName := fmt.Sprintf("mr-out-%d", resp.TaskNumber)
-		f, err := os.OpenFile(outputFileName, os.O_RDWR|os.O_CREATE, 0644)
+		f, err := os.CreateTemp("", "temp-reduce")
 		if err != nil {
 			log.Fatalf("can't create file for reduce task %d", resp.TaskNumber)
 		}
@@ -121,6 +122,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			i = j
 		}
 		f.Close()
+		os.Rename(f.Name(), outputFileName)
 		CallCompleteTask([]string{}, resp.TaskNumber)
 		log.Printf("reduce task %d finishes; generate output file %s", resp.TaskNumber, outputFileName)
 	}
