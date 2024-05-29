@@ -50,22 +50,6 @@ func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
 	for c.IdleQ.Len() == 0 && c.Counter.Count < c.NumOfMapTasks {
 		c.Counter.Wait()
 	}
-	if c.IdleQ.Len() == 0 && c.Counter.Count == c.NumOfMapTasks {
-		number := c.NumOfMapTasks
-		for p := 0; p < c.NumOfMapTasks; p++ {
-			files := c.Partitions.Read(p)
-			reduceTask := Task{
-				TaskNumber: number,
-				Files:      files,
-				JobType:    REDUCE,
-				Status:     IDLE,
-				UnixTime:   time.Now().UnixMicro(),
-				index:      p,
-			}
-			heap.Push(&c.IdleQ, &reduceTask)
-			c.Tasks = append(c.Tasks, reduceTask)
-		}
-	}
 	c.Counter.Unlock()
 
 	task := heap.Pop(&c.IdleQ).(*Task)
@@ -93,9 +77,6 @@ func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteRepl
 	}
 	c.Counter.Lock()
 	c.Counter.Count += 1
-	if c.Counter.Count == c.NumOfMapTasks {
-		c.Counter.Broadcast()
-	}
 	c.Counter.Unlock()
 	completedTask := c.Tasks[args.TaskNumber]
 	c.ProcessPQ.Done(&completedTask)
@@ -177,5 +158,25 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.initProcessQueue()
 	log.Println("run coordinator server")
 	c.server()
+	go func() {
+		for c.Counter.Count != c.NumOfMapTasks {
+			time.Sleep(100 * time.Millisecond)
+		}
+		number := c.NumOfMapTasks
+		for p := 0; p < c.NumOfMapTasks; p++ {
+			files := c.Partitions.Read(p)
+			reduceTask := Task{
+				TaskNumber: number,
+				Files:      files,
+				JobType:    REDUCE,
+				Status:     IDLE,
+				UnixTime:   time.Now().UnixMicro(),
+				index:      p,
+			}
+			heap.Push(&c.IdleQ, &reduceTask)
+			c.Tasks = append(c.Tasks, reduceTask)
+		}
+		c.Counter.Broadcast()
+	}()
 	return &c
 }
