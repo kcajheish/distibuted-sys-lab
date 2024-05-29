@@ -82,3 +82,14 @@ func (pq *PriorityQueue) Done(task *Task) {
 	heap.Fix(pq, task.index)
 	heap.Pop(pq)
 }
+
+func (pq *PriorityQueue) Top() *Task {
+	pq.mu.RLock()
+	defer pq.mu.RUnlock()
+	n := len(pq.tasks)
+	if n == 0 {
+		return nil
+	}
+	top := pq.tasks[n-1]
+	return top
+}

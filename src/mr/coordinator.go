@@ -3,6 +3,7 @@ package mr
 import (
 	"container/heap"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -177,6 +178,17 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			c.Tasks = append(c.Tasks, reduceTask)
 		}
 		c.Counter.Broadcast()
+	}()
+	go func() {
+		maxDuration := int64(math.Pow10(6)) // total us in a second
+		for {
+			now := time.Now().UnixMicro()
+			for task := c.ProcessPQ.Top(); task != nil && now-task.UnixTime > maxDuration; {
+				delayTask := heap.Pop(&c.ProcessPQ)
+				heap.Push(&c.IdleQ, delayTask)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 	}()
 	return &c
 }
