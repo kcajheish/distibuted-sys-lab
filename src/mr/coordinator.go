@@ -104,9 +104,8 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	a := c.IdleQ.Len()
-	b := c.ProcessPQ.Len()
-	return a+b == 0
+	total := c.NumOfMapTasks + c.NumOfReduceTasks
+	return total == c.Counter.Count
 }
 
 func (c *Coordinator) initTasks(files []string) {
