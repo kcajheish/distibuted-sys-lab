@@ -63,20 +63,22 @@ func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
 	}
 	task.UnixTime = time.Now().UnixMicro()
 	c.ProcessPQ.Push(task)
-	log.Printf("assign task %d to %d worker", task.TaskNumber, task.JobType)
 	reply.Files = task.Files
+	var jType string
 	if task.JobType == MAP {
-		reply.JobType = "map"
+		jType = "map"
 	} else {
-		reply.JobType = "reduce"
+		jType = "reduce"
 	}
+	reply.JobType = jType
 	reply.TaskNumber = task.TaskNumber
 	reply.NumOfReduceTasks = c.NumOfReduceTasks
+	log.Printf("master %d assign %s task %d to worker", os.Getegid(), task.TaskNumber, jType)
 	return nil
 }
 
 func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteReply) error {
-	log.Printf("coordinator receives complete task %d", args.TaskNumber)
+	log.Printf("master %d receives complete %s task %d", os.Getegid(), args.JobType, args.TaskNumber)
 	if args.JobType == "map" {
 		for _, file := range args.OutputFiles {
 			words := strings.Split(file, "-")
@@ -89,6 +91,7 @@ func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteRepl
 		c.Counter.Lock()
 		c.Counter.Count += 1
 		if c.Counter.Count == c.NumOfMapTasks {
+			log.Printf("master %d writes out all partitions from memory to files", os.Getegid())
 			for p := 0; p < c.NumOfReduceTasks; p++ {
 				files := c.Partitions.Read(p)
 				reduceTask := Task{
@@ -101,8 +104,7 @@ func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteRepl
 				c.IdleQ.Push(&reduceTask)
 				c.Tasks = append(c.Tasks, reduceTask)
 			}
-			log.Println("wake up all sleeping reduce worker")
-			log.Println(c.Partitions.partitions)
+			log.Println("master %d wake up all sleeping reduce worker", os.Getegid())
 			c.Counter.Broadcast()
 		}
 
@@ -110,7 +112,7 @@ func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteRepl
 		completedTask := c.Tasks[args.TaskNumber]
 
 		c.ProcessPQ.Done(&completedTask)
-		log.Printf("%d task is marked as compelted", args.TaskNumber)
+		log.Printf("master %d marks %d task as compelted", os.Getegid(), args.TaskNumber)
 	}
 	reply.Status = "success"
 	log.Printf("%s task %d finishes", args.JobType, args.TaskNumber)
