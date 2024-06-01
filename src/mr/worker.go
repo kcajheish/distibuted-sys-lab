@@ -42,7 +42,7 @@ func WorkerHelper(mapf func(string, string) []KeyValue,
 	}
 
 	if resp.JobType == "exit" {
-		log.Printf("job complete, close worker %d", os.Getegid())
+		log.Printf("job complete, close worker %d", os.Getpid())
 		os.Exit(1)
 	}
 
@@ -88,11 +88,11 @@ func WorkerHelper(mapf func(string, string) []KeyValue,
 			outputFiles = append(outputFiles, outputFileName)
 		}
 		CallCompleteTask(outputFiles, taskNumber, resp.JobType)
-		log.Printf("worker %d completes map task %d", os.Getegid(), taskNumber)
+		log.Printf("worker %d completes map task %d", os.Getpid(), taskNumber)
 	}
 
 	if resp.JobType == "reduce" {
-		log.Printf("start reduce worker %d, task_number=%d", os.Getegid(), resp.TaskNumber)
+		log.Printf("start reduce worker %d, task_number=%d", os.Getpid(), resp.TaskNumber)
 		files := resp.Files
 		intermediate := []KeyValue{}
 		for _, file := range files {
@@ -130,7 +130,7 @@ func WorkerHelper(mapf func(string, string) []KeyValue,
 		f.Close()
 		os.Rename(f.Name(), outputFileName)
 		CallCompleteTask([]string{}, resp.TaskNumber, resp.JobType)
-		log.Printf("worker %d reduce task %d finishes; generate output file %s", os.Getegid(), resp.TaskNumber, outputFileName)
+		log.Printf("worker %d reduce task %d finishes; generate output file %s", os.Getpid(), resp.TaskNumber, outputFileName)
 	}
 }
 

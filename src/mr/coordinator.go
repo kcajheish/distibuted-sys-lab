@@ -15,7 +15,7 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-	Tasks            []Task
+	Tasks            []*Task
 	IdleQ            SafeHeap
 	ProcessPQ        SafeHeap
 	NumOfReduceTasks int
@@ -30,6 +30,17 @@ const REDUCE = 1
 const IDLE = 0
 const IN_PROGRESS = 1
 const COMPLETED = 2
+
+var typeMap = map[int]string{
+	MAP:    "map",
+	REDUCE: "reduce",
+}
+
+var statusMap = map[int]string{
+	IDLE:        "idle",
+	IN_PROGRESS: "in-progress",
+	COMPLETED:   "completed",
+}
 
 type Task struct {
 	TaskNumber int
@@ -62,6 +73,7 @@ func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
 		return nil
 	}
 	task.UnixTime = time.Now().UnixMicro()
+	task.Status = IN_PROGRESS
 	c.ProcessPQ.Push(task)
 	reply.Files = task.Files
 	var jType string
@@ -73,12 +85,28 @@ func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
 	reply.JobType = jType
 	reply.TaskNumber = task.TaskNumber
 	reply.NumOfReduceTasks = c.NumOfReduceTasks
-	log.Printf("master %d assign %s task %d to worker", os.Getegid(), task.TaskNumber, jType)
+	log.Printf("master %d assign %s task %d to worker", os.Getpid(), jType, task.TaskNumber)
 	return nil
 }
 
+func (c *Coordinator) makeReduceTasks() {
+	for p := 0; p < c.NumOfReduceTasks; p++ {
+		files := c.Partitions.Read(p)
+		task := &Task{
+			TaskNumber: p + c.NumOfMapTasks,
+			Files:      files,
+			JobType:    REDUCE,
+			Status:     IDLE,
+			UnixTime:   time.Now().UnixMicro(),
+		}
+		c.IdleQ.Push(task)
+		c.Tasks = append(c.Tasks, task)
+	}
+}
+
 func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteReply) error {
-	log.Printf("master %d receives complete %s task %d", os.Getegid(), args.JobType, args.TaskNumber)
+	log.Printf("master %d receives complete %s task %d", os.Getpid(), args.JobType, args.TaskNumber)
+	task := c.Tasks[args.TaskNumber]
 	if args.JobType == "map" {
 		for _, file := range args.OutputFiles {
 			words := strings.Split(file, "-")
@@ -89,34 +117,33 @@ func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteRepl
 			c.Partitions.Append(partitionNumber, file)
 		}
 		c.Counter.Lock()
-		c.Counter.Count += 1
-		if c.Counter.Count == c.NumOfMapTasks {
-			log.Printf("master %d writes out all partitions from memory to files", os.Getegid())
-			for p := 0; p < c.NumOfReduceTasks; p++ {
-				files := c.Partitions.Read(p)
-				reduceTask := Task{
-					TaskNumber: p + c.NumOfMapTasks,
-					Files:      files,
-					JobType:    REDUCE,
-					Status:     IDLE,
-					UnixTime:   time.Now().UnixMicro(),
-				}
-				c.IdleQ.Push(&reduceTask)
-				c.Tasks = append(c.Tasks, reduceTask)
+		if task.Status == IN_PROGRESS {
+			c.Counter.Count += 1
+			c.ProcessPQ.Done(task)
+			task.Status = COMPLETED
+			if c.Counter.Count == c.NumOfMapTasks {
+				log.Printf("master %d writes out all partitions from memory to files", os.Getpid())
+				c.makeReduceTasks()
+				log.Printf("master %d wake up all sleeping reduce worker", os.Getpid())
+				c.Counter.Broadcast()
 			}
-			log.Println("master %d wake up all sleeping reduce worker", os.Getegid())
-			c.Counter.Broadcast()
+		} else {
+			log.Printf("master %d receives completed %s task %d currently in status %s", os.Getpid(), typeMap[task.JobType], task.TaskNumber, statusMap[task.Status])
 		}
-
 		c.Counter.Unlock()
-		completedTask := c.Tasks[args.TaskNumber]
-
-		c.ProcessPQ.Done(&completedTask)
-		log.Printf("master %d marks %d task as compelted", os.Getegid(), args.TaskNumber)
+	} else if args.JobType == "reduce" {
+		c.Counter.Lock()
+		if task.Status == IN_PROGRESS {
+			task.Status = COMPLETED
+			c.ProcessPQ.Done(task)
+			c.Counter.Count += 1
+		} else {
+			log.Printf("master %d receives completed %s task %d currently in status %s", os.Getpid(), typeMap[task.JobType], task.TaskNumber, statusMap[task.Status])
+		}
+		c.Counter.Unlock()
 	}
 	reply.Status = "success"
-	log.Printf("%s task %d finishes", args.JobType, args.TaskNumber)
-
+	log.Printf("master %d marks %s task %d  as compelted", os.Getpid(), args.JobType, args.TaskNumber)
 	return nil
 }
 
@@ -143,9 +170,9 @@ func (c *Coordinator) Done() bool {
 }
 
 func (c *Coordinator) initTasks(files []string) {
-	c.Tasks = make([]Task, 0, c.NumOfMapTasks+c.NumOfReduceTasks)
+	c.Tasks = make([]*Task, 0, c.NumOfMapTasks+c.NumOfReduceTasks)
 	for i, file := range files {
-		task := Task{
+		task := &Task{
 			TaskNumber: i,
 			Status:     IDLE,
 			JobType:    MAP,
@@ -160,7 +187,7 @@ func (c *Coordinator) initIdleQueue() {
 	pq := make(PriorityQueue, 0, c.NumOfMapTasks+c.NumOfReduceTasks)
 	c.IdleQ = NewPQ(&pq)
 	for _, task := range c.Tasks {
-		c.IdleQ.Push(&task)
+		c.IdleQ.Push(task)
 	}
 }
 
@@ -173,7 +200,7 @@ func (c *Coordinator) initProcessQueue() {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	log.Printf("start master id=%d", os.Getegid())
+	log.Printf("start master id=%d", os.Getpid())
 	c := Coordinator{
 		NumOfReduceTasks: nReduce,
 		NumOfMapTasks:    len(files),
@@ -198,6 +225,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		for {
 			now := time.Now().UnixMicro()
 			if task := c.ProcessPQ.ExpireAndPop(now, maxDuration); task != nil {
+				task.Status = IDLE
 				c.IdleQ.Push(task)
 			}
 			time.Sleep(100 * time.Millisecond)

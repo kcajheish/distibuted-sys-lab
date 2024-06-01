@@ -35,7 +35,6 @@ func (sh *SafeHeap) Pop() *Task {
 func (sh *SafeHeap) Done(task *Task) {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	task.Status = COMPLETED
 	heap.Remove(sh.h, task.index)
 }
 
