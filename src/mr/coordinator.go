@@ -26,6 +26,7 @@ type Coordinator struct {
 
 const MAP = 0
 const REDUCE = 1
+const EXIT = 2
 
 const IDLE = 0
 const IN_PROGRESS = 1
@@ -34,6 +35,7 @@ const COMPLETED = 2
 var typeMap = map[int]string{
 	MAP:    "map",
 	REDUCE: "reduce",
+	EXIT:   "exit",
 }
 
 var statusMap = map[int]string{
@@ -54,10 +56,21 @@ type Task struct {
 func (c *Coordinator) pollTask() *Task {
 	c.Counter.Lock()
 	var task *Task
+	total := c.NumOfMapTasks + c.NumOfReduceTasks
 	for {
 		task = c.IdleQ.Pop()
-		if task == nil && c.Counter.Count < c.NumOfMapTasks {
-			c.Counter.Wait()
+		if task == nil {
+			if c.Counter.Count > c.NumOfMapTasks && c.Counter.Count < total {
+				c.IdleQ.Push(&Task{
+					JobType: EXIT,
+				})
+				c.Counter.Wait()
+			} else if c.Counter.Count == total {
+				task = &Task{
+					JobType: EXIT,
+				}
+				break
+			}
 		} else {
 			break
 		}
@@ -68,24 +81,19 @@ func (c *Coordinator) pollTask() *Task {
 
 func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
 	task := c.pollTask()
-	if task == nil {
-		reply.JobType = "exit"
+	if task.JobType == EXIT {
+		log.Printf("master %d ask worker to exit", os.Getpid())
+		reply.JobType = typeMap[task.JobType]
 		return nil
 	}
 	task.UnixTime = time.Now().UnixMicro()
 	task.Status = IN_PROGRESS
 	c.ProcessPQ.Push(task)
 	reply.Files = task.Files
-	var jType string
-	if task.JobType == MAP {
-		jType = "map"
-	} else {
-		jType = "reduce"
-	}
-	reply.JobType = jType
+	reply.JobType = typeMap[task.JobType]
 	reply.TaskNumber = task.TaskNumber
 	reply.NumOfReduceTasks = c.NumOfReduceTasks
-	log.Printf("master %d assign %s task %d to worker", os.Getpid(), jType, task.TaskNumber)
+	log.Printf("master %d assign %s task %d to worker", os.Getpid(), typeMap[task.JobType], task.TaskNumber)
 	return nil
 }
 
@@ -137,6 +145,9 @@ func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteRepl
 			task.Status = COMPLETED
 			c.ProcessPQ.Done(task)
 			c.Counter.Count += 1
+			if c.Counter.Count == c.NumOfMapTasks+c.NumOfReduceTasks {
+				c.Counter.Broadcast()
+			}
 		} else {
 			log.Printf("master %d receives completed %s task %d currently in status %s", os.Getpid(), typeMap[task.JobType], task.TaskNumber, statusMap[task.Status])
 		}
@@ -227,6 +238,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			if task := c.ProcessPQ.ExpireAndPop(now, maxDuration); task != nil {
 				task.Status = IDLE
 				c.IdleQ.Push(task)
+				c.Counter.Lock()
+				c.Counter.Signal()
+				c.Counter.Unlock()
 			}
 			time.Sleep(100 * time.Millisecond)
 		}

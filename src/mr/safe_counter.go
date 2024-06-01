@@ -22,3 +22,7 @@ func (sc *SafeCounter) Unlock() {
 func (sc *SafeCounter) Broadcast() {
 	sc.Cond.Broadcast()
 }
+
+func (sc *SafeCounter) Signal() {
+	sc.Cond.Signal()
+}
