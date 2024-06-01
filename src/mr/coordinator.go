@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"container/heap"
 	"log"
 	"math"
 	"net"
@@ -17,8 +16,8 @@ import (
 type Coordinator struct {
 	// Your definitions here.
 	Tasks            []Task
-	IdleQ            PriorityQueue
-	ProcessPQ        PriorityQueue
+	IdleQ            SafeHeap
+	ProcessPQ        SafeHeap
 	NumOfReduceTasks int
 	NumOfMapTasks    int
 	Partitions       SafeMap
@@ -41,21 +40,30 @@ type Task struct {
 	index      int // position at the priority queue
 }
 
+func (c *Coordinator) pollTask() *Task {
+	c.Counter.Lock()
+	var task *Task
+	for {
+		task = c.IdleQ.Pop()
+		if task == nil && c.Counter.Count < c.NumOfMapTasks {
+			c.Counter.Wait()
+		} else {
+			break
+		}
+	}
+	c.Counter.Unlock()
+	return task
+}
+
 func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
-	if c.ProcessPQ.Len() == 0 && c.Counter.Count == c.NumOfMapTasks+c.NumOfReduceTasks {
+	task := c.pollTask()
+	if task == nil {
 		reply.JobType = "exit"
 		return nil
 	}
-
-	c.Counter.Lock()
-	for c.IdleQ.Len() == 0 && c.Counter.Count < c.NumOfMapTasks {
-		c.Counter.Wait()
-	}
-	c.Counter.Unlock()
-
-	task := heap.Pop(&c.IdleQ).(*Task)
 	task.UnixTime = time.Now().UnixMicro()
 	c.ProcessPQ.Push(task)
+	log.Printf("assign task %d to %d worker", task.TaskNumber, task.JobType)
 	reply.Files = task.Files
 	if task.JobType == MAP {
 		reply.JobType = "map"
@@ -68,22 +76,45 @@ func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
 }
 
 func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteReply) error {
-	for _, file := range args.OutputFiles {
-		words := strings.Split(file, "-")
-		partitionNumber, err := strconv.Atoi(words[3]) // mr-out-<map number>-<partition number>
-		if err != nil {
-			log.Fatal("can't convert %s to partition number", partitionNumber)
+	log.Printf("coordinator receives complete task %d", args.TaskNumber)
+	if args.JobType == "map" {
+		for _, file := range args.OutputFiles {
+			words := strings.Split(file, "-")
+			partitionNumber, err := strconv.Atoi(words[2]) // mr-<map number>-<partition number>
+			if err != nil {
+				log.Fatalf("can't convert %d to partition number", partitionNumber)
+			}
+			c.Partitions.Append(partitionNumber, file)
 		}
-		c.Partitions.Append(partitionNumber, file)
+		c.Counter.Lock()
+		c.Counter.Count += 1
+		if c.Counter.Count == c.NumOfMapTasks {
+			for p := 0; p < c.NumOfReduceTasks; p++ {
+				files := c.Partitions.Read(p)
+				reduceTask := Task{
+					TaskNumber: p + c.NumOfMapTasks,
+					Files:      files,
+					JobType:    REDUCE,
+					Status:     IDLE,
+					UnixTime:   time.Now().UnixMicro(),
+				}
+				c.IdleQ.Push(&reduceTask)
+				c.Tasks = append(c.Tasks, reduceTask)
+			}
+			log.Println("wake up all sleeping reduce worker")
+			log.Println(c.Partitions.partitions)
+			c.Counter.Broadcast()
+		}
+
+		c.Counter.Unlock()
+		completedTask := c.Tasks[args.TaskNumber]
+
+		c.ProcessPQ.Done(&completedTask)
+		log.Printf("%d task is marked as compelted", args.TaskNumber)
 	}
-	c.Counter.Lock()
-	c.Counter.Count += 1
-	c.Counter.Unlock()
-	completedTask := c.Tasks[args.TaskNumber]
-	c.ProcessPQ.Done(&completedTask)
 	reply.Status = "success"
-	log.Println(c.Partitions.partitions)
-	log.Printf("map task %d finishes", args.TaskNumber)
+	log.Printf("%s task %d finishes", args.JobType, args.TaskNumber)
+
 	return nil
 }
 
@@ -104,8 +135,9 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	total := c.NumOfMapTasks + c.NumOfReduceTasks
-	return total == c.Counter.Count
+	c.Counter.Lock()
+	defer c.Counter.Unlock()
+	return c.NumOfMapTasks+c.NumOfReduceTasks == c.Counter.Count
 }
 
 func (c *Coordinator) initTasks(files []string) {
@@ -123,22 +155,23 @@ func (c *Coordinator) initTasks(files []string) {
 }
 
 func (c *Coordinator) initIdleQueue() {
-	c.IdleQ = PriorityQueue{}
-	c.IdleQ.tasks = make([]*Task, 0, c.NumOfMapTasks+c.NumOfReduceTasks)
+	pq := make(PriorityQueue, 0, c.NumOfMapTasks+c.NumOfReduceTasks)
+	c.IdleQ = NewPQ(&pq)
 	for _, task := range c.Tasks {
 		c.IdleQ.Push(&task)
 	}
 }
 
 func (c *Coordinator) initProcessQueue() {
-	c.ProcessPQ = PriorityQueue{}
-	c.ProcessPQ.tasks = make([]*Task, 0, c.NumOfMapTasks+c.NumOfReduceTasks)
+	pq := make(PriorityQueue, 0, c.NumOfMapTasks+c.NumOfReduceTasks)
+	c.ProcessPQ = NewPQ(&pq)
 }
 
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
+	log.Printf("start master id=%d", os.Getegid())
 	c := Coordinator{
 		NumOfReduceTasks: nReduce,
 		NumOfMapTasks:    len(files),
@@ -159,32 +192,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	log.Println("run coordinator server")
 	c.server()
 	go func() {
-		for c.Counter.Count != c.NumOfMapTasks {
-			time.Sleep(100 * time.Millisecond)
-		}
-		number := c.NumOfMapTasks
-		for p := 0; p < c.NumOfMapTasks; p++ {
-			files := c.Partitions.Read(p)
-			reduceTask := Task{
-				TaskNumber: number,
-				Files:      files,
-				JobType:    REDUCE,
-				Status:     IDLE,
-				UnixTime:   time.Now().UnixMicro(),
-				index:      p,
-			}
-			heap.Push(&c.IdleQ, &reduceTask)
-			c.Tasks = append(c.Tasks, reduceTask)
-		}
-		c.Counter.Broadcast()
-	}()
-	go func() {
-		maxDuration := int64(math.Pow10(6)) // total us in a second
+		maxDuration := int64(math.Pow10(6) * 10) // total us in a second
 		for {
 			now := time.Now().UnixMicro()
-			for task := c.ProcessPQ.Top(); task != nil && now-task.UnixTime > maxDuration; {
-				delayTask := heap.Pop(&c.ProcessPQ)
-				heap.Push(&c.IdleQ, delayTask)
+			if task := c.ProcessPQ.ExpireAndPop(now, maxDuration); task != nil {
+				c.IdleQ.Push(task)
 			}
 			time.Sleep(100 * time.Millisecond)
 		}

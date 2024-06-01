@@ -28,6 +28,13 @@ func ihash(key string) int {
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
+	log.Printf("worker id %d start", os.Getpid())
+	for {
+		WorkerHelper(mapf, reducef)
+	}
+}
+func WorkerHelper(mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) {
 	// Your worker implementation here.
 	resp, err := CallTask()
 	if err != nil {
@@ -35,7 +42,8 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 
 	if resp.JobType == "exit" {
-		return
+		log.Printf("job complete, clsoe worker %d", os.Getegid())
+		os.Exit(1)
 	}
 
 	if resp.JobType == "map" {
@@ -57,7 +65,6 @@ func Worker(mapf func(string, string) []KeyValue,
 		log.Printf("start map worker %d\n", taskNumber)
 		keyValuePairs := mapf(resp.Files[0], string(content))
 
-		log.Print("start partitioning key\n")
 		partition := map[int][]KeyValue{}
 		for _, kv := range keyValuePairs {
 			hashValue := ihash(kv.Key)
@@ -65,10 +72,9 @@ func Worker(mapf func(string, string) []KeyValue,
 			partition[partitionNumber] = append(partition[partitionNumber], kv)
 		}
 
-		log.Println("start writing intermediate key/value into output partition files")
 		outputFiles := make([]string, 0)
 		for partitionNumber, kvPairs := range partition {
-			outputFileName := fmt.Sprintf("mr-out-%d-%d", taskNumber, partitionNumber)
+			outputFileName := fmt.Sprintf("mr-%d-%d", taskNumber, partitionNumber)
 			f, err := os.CreateTemp("", "temp-map")
 			if err != nil {
 				log.Fatalf("can't establish IO to file %s; err = %s\n", outputFileName, err)
@@ -81,8 +87,8 @@ func Worker(mapf func(string, string) []KeyValue,
 			os.Rename(f.Name(), outputFileName)
 			outputFiles = append(outputFiles, outputFileName)
 		}
-		CallCompleteTask(outputFiles, taskNumber)
-		log.Println("worker complete task", taskNumber)
+		CallCompleteTask(outputFiles, taskNumber, resp.JobType)
+		log.Println("map worker complete task", taskNumber)
 	}
 
 	if resp.JobType == "reduce" {
@@ -92,7 +98,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		for _, file := range files {
 			f, err := os.Open(file)
 			if err != nil {
-				log.Fatal("can't open file %s", file)
+				log.Fatalf("can't open file %s", file)
 			}
 			dec := json.NewDecoder(f)
 			for {
@@ -110,7 +116,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		if err != nil {
 			log.Fatalf("can't create file for reduce task %d", resp.TaskNumber)
 		}
-		for i := 0; i < len(intermediate); i++ {
+		for i := 0; i < len(intermediate); {
 			j := i
 			values := []string{}
 			for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
@@ -119,11 +125,11 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			output := reducef(intermediate[i].Key, values)
 			fmt.Fprintf(f, "%v %v\n", intermediate[i].Key, output)
-			i = j
+			i = j // next key
 		}
 		f.Close()
 		os.Rename(f.Name(), outputFileName)
-		CallCompleteTask([]string{}, resp.TaskNumber)
+		CallCompleteTask([]string{}, resp.TaskNumber, resp.JobType)
 		log.Printf("reduce task %d finishes; generate output file %s", resp.TaskNumber, outputFileName)
 	}
 }
@@ -131,6 +137,7 @@ func Worker(mapf func(string, string) []KeyValue,
 type Args struct {
 	TaskNumber  int
 	OutputFiles []string
+	JobType     string
 }
 
 type Reply struct {
@@ -138,6 +145,7 @@ type Reply struct {
 	JobType          string
 	TaskNumber       int
 	NumOfReduceTasks int
+	Status           string
 }
 
 func CallTask() (Reply, error) {
@@ -152,15 +160,16 @@ func CallTask() (Reply, error) {
 
 }
 
-func CallCompleteTask(outputFiles []string, taskNumber int) (Reply, error) {
+func CallCompleteTask(outputFiles []string, taskNumber int, jobType string) (Reply, error) {
 	args := Args{
 		OutputFiles: outputFiles,
 		TaskNumber:  taskNumber,
+		JobType:     jobType,
 	}
 	reply := Reply{}
 	ok := call("Coordinator.CompleteTask", &args, &reply)
 	if !ok {
-		return reply, fmt.Errorf("task_number=%d, output_file=%s failed to notify coordinator", taskNumber)
+		return reply, fmt.Errorf("task_number=%d failed to notify coordinator", taskNumber)
 	} else {
 		return reply, nil
 	}

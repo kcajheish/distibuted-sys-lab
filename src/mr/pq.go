@@ -5,22 +5,71 @@ import (
 	"sync"
 )
 
+type SafeHeap struct {
+	h  *PriorityQueue
+	mu sync.RWMutex
+}
+
+func NewPQ(pq *PriorityQueue) SafeHeap {
+	return SafeHeap{
+		h: pq,
+	}
+}
+
+func (sh *SafeHeap) Push(task *Task) {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	heap.Push(sh.h, task)
+}
+
+func (sh *SafeHeap) Pop() *Task {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if sh.h.Len() > 0 {
+		return heap.Pop(sh.h).(*Task)
+	}
+	return nil
+}
+
+// update modifies the priority and value of an Item in the queue.
+func (sh *SafeHeap) Done(task *Task) {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	task.Status = COMPLETED
+	heap.Remove(sh.h, task.index)
+}
+
+func (sh *SafeHeap) Top() *Task {
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	return sh.h.Top()
+}
+
+func (sh SafeHeap) Len() int {
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	return sh.h.Len()
+}
+
+func (sh *SafeHeap) ExpireAndPop(current, max int64) *Task {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	if top := sh.h.Top(); top != nil && current-top.UnixTime > max {
+		return heap.Pop(sh.h).(*Task)
+	}
+	return nil
+}
+
 // A PriorityQueue implements heap.Interface and holds Items.
-type PriorityQueue struct {
-	tasks []*Task
-	mu    sync.RWMutex
+type PriorityQueue []*Task
+
+func (pq PriorityQueue) Len() int {
+	return len(pq)
 }
 
-func (pq *PriorityQueue) Len() int {
-	pq.mu.RLock()
-	defer pq.mu.RUnlock()
-	return len(pq.tasks)
-}
-
-func (pq *PriorityQueue) Less(i, j int) bool {
-	pq.mu.RLock()
-	defer pq.mu.RUnlock()
-	t := pq.tasks
+func (pq PriorityQueue) Less(i, j int) bool {
+	t := pq
 	if t[i].Status == COMPLETED {
 		return true
 	}
@@ -45,9 +94,7 @@ func (pq *PriorityQueue) Less(i, j int) bool {
 }
 
 func (pq *PriorityQueue) Swap(i, j int) {
-	pq.mu.Lock()
-	defer pq.mu.Unlock()
-	t := pq.tasks
+	t := *pq
 	t[i], t[j] = t[j], t[i]
 	t[i].index = i
 	t[j].index = j
@@ -55,41 +102,26 @@ func (pq *PriorityQueue) Swap(i, j int) {
 
 func (pq *PriorityQueue) Push(x any) {
 	task := x.(*Task)
-	pq.mu.Lock()
-	defer pq.mu.Unlock()
-	n := len(pq.tasks)
+	n := len(*pq)
 	task.index = n
-	pq.tasks = append(pq.tasks, task)
+	*pq = append(*pq, task)
 }
 
 func (pq *PriorityQueue) Pop() any {
-	pq.mu.Lock()
-	defer pq.mu.Unlock()
-	old := pq.tasks
+	old := *pq
 	n := len(old)
 	item := old[n-1]
 	item.index = -1
 	old[n-1] = nil
-	pq.tasks = old[:n-1]
+	*pq = old[:n-1]
 	return item
 }
 
-// update modifies the priority and value of an Item in the queue.
-func (pq *PriorityQueue) Done(task *Task) {
-	task.Status = COMPLETED
-	pq.mu.Lock()
-	defer pq.mu.Unlock()
-	heap.Fix(pq, task.index)
-	heap.Pop(pq)
-}
-
 func (pq *PriorityQueue) Top() *Task {
-	pq.mu.RLock()
-	defer pq.mu.RUnlock()
-	n := len(pq.tasks)
+	n := len(*pq)
 	if n == 0 {
 		return nil
 	}
-	top := pq.tasks[n-1]
+	top := (*pq)[n-1]
 	return top
 }

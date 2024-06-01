@@ -39,6 +39,7 @@ type TaskReply struct {
 
 type TaskCompleteArg struct {
 	TaskNumber  int
+	JobType     string
 	OutputFiles []string
 }
 
