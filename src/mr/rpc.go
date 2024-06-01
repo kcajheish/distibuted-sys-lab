@@ -26,6 +26,7 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 type TaskArg struct {
+	WorkerID    int
 	TaskNumber  int
 	OutputFiles []string
 }
@@ -38,6 +39,7 @@ type TaskReply struct {
 }
 
 type TaskCompleteArg struct {
+	WorkerID    int
 	TaskNumber  int
 	JobType     string
 	OutputFiles []string

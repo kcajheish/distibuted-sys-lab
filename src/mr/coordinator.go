@@ -32,6 +32,8 @@ const IDLE = 0
 const IN_PROGRESS = 1
 const COMPLETED = 2
 
+const NO_ASSIGNED_WORKER = -1
+
 var typeMap = map[int]string{
 	MAP:    "map",
 	REDUCE: "reduce",
@@ -51,6 +53,7 @@ type Task struct {
 	Status     int
 	UnixTime   int64
 	index      int // position at the priority queue
+	Assigned   int
 }
 
 func (c *Coordinator) pollTask() *Task {
@@ -65,7 +68,8 @@ func (c *Coordinator) pollTask() *Task {
 					JobType: EXIT,
 				})
 				c.Counter.Wait()
-			} else if c.Counter.Count == total {
+			}
+			if c.Counter.Count == total {
 				task = &Task{
 					JobType: EXIT,
 				}
@@ -88,6 +92,7 @@ func (c *Coordinator) GetTask(args TaskArg, reply *TaskReply) error {
 	}
 	task.UnixTime = time.Now().UnixMicro()
 	task.Status = IN_PROGRESS
+	task.Assigned = args.WorkerID
 	c.ProcessPQ.Push(task)
 	reply.Files = task.Files
 	reply.JobType = typeMap[task.JobType]
@@ -106,6 +111,7 @@ func (c *Coordinator) makeReduceTasks() {
 			JobType:    REDUCE,
 			Status:     IDLE,
 			UnixTime:   time.Now().UnixMicro(),
+			Assigned:   NO_ASSIGNED_WORKER,
 		}
 		c.IdleQ.Push(task)
 		c.Tasks = append(c.Tasks, task)
@@ -113,8 +119,12 @@ func (c *Coordinator) makeReduceTasks() {
 }
 
 func (c *Coordinator) CompleteTask(args TaskCompleteArg, reply *TaskCompleteReply) error {
-	log.Printf("master %d receives complete %s task %d", os.Getpid(), args.JobType, args.TaskNumber)
 	task := c.Tasks[args.TaskNumber]
+	if task.Assigned != args.WorkerID {
+		log.Printf("master %d receives duplicated completed task %s from worker %d; task is now run by worker %d; ignore request", os.Getpid(), task.JobType, args.WorkerID, task.Assigned)
+		return nil
+	}
+	log.Printf("master %d receives completed %s task %d", os.Getpid(), args.JobType, args.TaskNumber)
 	if args.JobType == "map" {
 		for _, file := range args.OutputFiles {
 			words := strings.Split(file, "-")
@@ -189,6 +199,7 @@ func (c *Coordinator) initTasks(files []string) {
 			JobType:    MAP,
 			Files:      []string{file},
 			UnixTime:   time.Now().UnixMicro(), // unix time in micro seconds
+			Assigned:   NO_ASSIGNED_WORKER,
 		}
 		c.Tasks = append(c.Tasks, task)
 	}
@@ -237,6 +248,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			now := time.Now().UnixMicro()
 			if task := c.ProcessPQ.ExpireAndPop(now, maxDuration); task != nil {
 				task.Status = IDLE
+				task.Assigned = NO_ASSIGNED_WORKER
 				c.IdleQ.Push(task)
 				c.Counter.Lock()
 				c.Counter.Signal()

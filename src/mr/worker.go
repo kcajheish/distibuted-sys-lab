@@ -135,6 +135,7 @@ func WorkerHelper(mapf func(string, string) []KeyValue,
 }
 
 type Args struct {
+	WorkerID    int
 	TaskNumber  int
 	OutputFiles []string
 	JobType     string
@@ -149,7 +150,9 @@ type Reply struct {
 }
 
 func CallTask() (Reply, error) {
-	args := Args{}
+	args := Args{
+		WorkerID: os.Getpid(),
+	}
 	reply := Reply{}
 	ok := call("Coordinator.GetTask", &args, &reply)
 	if !ok {
@@ -162,6 +165,7 @@ func CallTask() (Reply, error) {
 
 func CallCompleteTask(outputFiles []string, taskNumber int, jobType string) (Reply, error) {
 	args := Args{
+		WorkerID:    os.Getpid(),
 		OutputFiles: outputFiles,
 		TaskNumber:  taskNumber,
 		JobType:     jobType,
