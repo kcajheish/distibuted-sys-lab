@@ -221,7 +221,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	log.Println("run coordinator server")
 	c.server()
 	go func() {
-		maxDuration := int64(math.Pow10(6) * 10) // total us in a second
+		maxDuration := int64(math.Pow10(6) * 10) // 10 second in us
 		for {
 			now := time.Now().UnixMicro()
 			if task := c.ProcessPQ.ExpireAndPop(now, maxDuration); task != nil {
