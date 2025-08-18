@@ -21,7 +21,6 @@ import (
 	//	"bytes"
 
 	"context"
-	"fmt"
 	"log"
 	"math/rand"
 	"sync"
@@ -194,6 +193,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// check logs are up to date
 		if args.PrevLogIndex >= len(rf.logs) || (args.PrevLogIndex > 0 && rf.logs[args.PrevLogIndex].Term != args.Term) {
 			reply.Success = false
+			log.Printf("s%d logs are more up to date than leader; log=%v, args=%v", rf.me, rf.logs, args)
 			return
 		}
 
@@ -335,7 +335,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) { // index, term, is
 		}
 		index = len(rf.logs)
 		rf.logs = append(rf.logs, entry)
-		log.Printf("s%d receives cmd=%d at index=%d\n", rf.me, command.(int), index)
+		log.Printf("s%d receives cmd=%v at index=%d\n", rf.me, command, index)
 	}
 
 	return index, term, isLeader
@@ -375,26 +375,27 @@ func (rf *Raft) heartbeats() {
 				break
 			}
 
-			args := &AppendEntriesArgs{
+			args := AppendEntriesArgs{
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
 				LeaderCommit: rf.commitIndex,
 			}
-			reply := &AppendEntriesReply{}
+			reply := AppendEntriesReply{}
 			batchSize := 10
 			logs := rf.getLogsInBatch(rf.nextIndex[i], batchSize)
-			fmt.Printf("s%d s%d %v\n", rf.me, i, logs)
+
 			if logs != nil {
-				args.Entries = append(args.Entries, rf.logs[rf.nextIndex[i]])
+				args.Entries = append(args.Entries, logs...)
 				args.PrevLogIndex = rf.nextIndex[i] - 1
 
 			}
 			rf.mu.Unlock()
-
 			go func() {
-				if rf.sendAppendEntries(i, args, reply) {
+				if rf.sendAppendEntries(i, &args, &reply) {
 					rf.mu.Lock()
 					defer rf.mu.Unlock()
+
+					log.Printf("heartbeats: s%d s%d;  args=%#v reply=%v\n", rf.me, i, args, reply)
 
 					if !reply.Success && reply.CurrentTerm > rf.currentTerm {
 						rf.currentTerm = reply.CurrentTerm
@@ -407,7 +408,10 @@ func (rf *Raft) heartbeats() {
 						log.Printf("s%d sends logs to s%d from %d to %d\n", rf.me, i, rf.nextIndex[i], rf.nextIndex[i]+len(logs)-1)
 						rf.logMatching(reply.Success, i, len(logs))
 					}
-					rf.updateCommitIndex()
+
+					if reply.Success && len(logs) > 0 {
+						rf.updateCommitIndex()
+					}
 
 				}
 			}()
@@ -427,8 +431,9 @@ func (rf *Raft) getLogsInBatch(from int, size int) []LogEntry {
 
 func (rf *Raft) logMatching(status bool, server int, size int) {
 	if status {
-		rf.matchIndex[server] = rf.nextIndex[server] + size - 1
 		rf.nextIndex[server] += size
+		rf.matchIndex[server] = rf.nextIndex[server] - 1
+
 	} else {
 		rf.nextIndex[server] -= 1
 		rf.matchIndex[server] = rf.nextIndex[server] - 1
@@ -445,12 +450,12 @@ func (rf *Raft) updateCommitIndex() {
 		if rf.logs[index].Term != rf.currentTerm {
 			continue
 		}
-		count := 0
+		count := 1
 		for p := 0; p < len(rf.peers); p++ {
 			if p == rf.me {
 				continue
 			}
-			if rf.matchIndex[p] >= rf.commitIndex {
+			if rf.matchIndex[p] >= index {
 				count += 1
 			}
 		}
@@ -460,7 +465,7 @@ func (rf *Raft) updateCommitIndex() {
 		}
 	}
 	if old != rf.commitIndex {
-		log.Printf("s%d commit index from=%d to=%d\n", rf.me, old+1, rf.commitIndex)
+		log.Printf("s%d(leader) commit index from=%d to=%d match_index=%#v\n", rf.me, old+1, rf.commitIndex, rf.matchIndex)
 		go rf.ApplyCommand(old+1, rf.commitIndex)
 	}
 }
@@ -497,6 +502,7 @@ func (rf *Raft) AskVote(ctx context.Context, wg *sync.WaitGroup, server int, can
 			ok = rf.sendRequestVote(server, args, reply)
 		}
 	}
+	log.Printf("RequestVote: s%d args=%#v reply=%#v", rf.me, args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.status != CANDIDATE || rf.currentTerm != term {
