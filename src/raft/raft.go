@@ -193,7 +193,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// check logs are up to date
 		if args.PrevLogIndex >= len(rf.logs) || (args.PrevLogIndex > 0 && rf.logs[args.PrevLogIndex].Term != args.Term) {
 			reply.Success = false
-			log.Printf("s%d logs are more up to date than leader; log=%v, args=%v", rf.me, rf.logs, args)
+			log.Printf("s%d log matching fails; log=%#v, args=%#v", rf.me, rf.logs, args)
 			return
 		}
 
@@ -258,6 +258,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.currentTerm > args.Term {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
+		return
+	}
+
+	lastEntry := rf.logs[len(rf.logs)-1]
+	isLeaderUpToDate := (args.LastLogTerm > lastEntry.Term) || (args.LastLogTerm == lastEntry.Term && args.LastLogIndex >= len(rf.logs)-1)
+	if !isLeaderUpToDate {
+		log.Printf("s%d rejects vote since leader is not up to date; args=%#v last_entry=%#v index=%d", rf.me, args, lastEntry, len(rf.logs)-1)
+		reply.VoteGranted = false
 		return
 	}
 
@@ -486,9 +494,12 @@ func (rf *Raft) Majority() int {
 
 func (rf *Raft) AskVote(ctx context.Context, wg *sync.WaitGroup, server int, candidate int, term int, out chan int) {
 	defer wg.Done()
+	lastEntry := rf.logs[len(rf.logs)-1]
 	args := &RequestVoteArgs{
-		Term:        term,
-		CandidateId: candidate,
+		Term:         term,
+		CandidateId:  candidate,
+		LastLogTerm:  lastEntry.Term,
+		LastLogIndex: len(rf.logs) - 1,
 	}
 	reply := &RequestVoteReply{}
 
@@ -510,7 +521,6 @@ func (rf *Raft) AskVote(ctx context.Context, wg *sync.WaitGroup, server int, can
 		Debug(dVote, "S%d not a candidate anymore; cancel vote", rf.me)
 	} else if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
-		rf.voteFor = NO_LEADER
 		rf.status = FOLLOWER
 		out <- -1
 		Debug(dVote, "S%d term is greater than S%d; S%d returns to follower", server, rf.me, rf.me)
@@ -582,6 +592,7 @@ func (rf *Raft) ticker() {
 			close(out)
 			if rf.status != LEADER {
 				rf.status = FOLLOWER
+				rf.voteFor = NO_LEADER
 			}
 			Debug(dVote, "S%d get %d votes in term %d", rf.me, votes, rf.currentTerm)
 		} else {
