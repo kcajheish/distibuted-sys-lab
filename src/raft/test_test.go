@@ -520,6 +520,7 @@ func TestBackup2B(t *testing.T) {
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
+	log.Printf("disconnect 3 followers\n")
 
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
@@ -530,11 +531,13 @@ func TestBackup2B(t *testing.T) {
 
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
+	log.Printf("disconnect a leader and a follower\n")
 
 	// allow other partition to recover
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
+	log.Printf("reconnect three servers\n")
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
@@ -548,6 +551,7 @@ func TestBackup2B(t *testing.T) {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
+	log.Printf("disconnect a follower\n")
 
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
@@ -563,6 +567,7 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
+	log.Printf("disconnect all servers and then connect old leader and two other servers %d %d %d \n", (leader1+0)%servers, (leader1+1)%servers, other)
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
