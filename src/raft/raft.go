@@ -160,6 +160,13 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	CurrentTerm int
 	Success     bool
+	ConflictMeta
+}
+
+type ConflictMeta struct {
+	Term   int
+	Index  int // index = 0 when entry doesn't exit in follower log
+	Length int
 }
 
 func getRandomTimeout() time.Time {
@@ -194,7 +201,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			le = rf.Logs[args.PrevLogIndex]
 		}
 		reply.Success = false
-		log.Printf("s%d log matching fails; log=%#v, args=%#v", rf.me, le, args)
+		if rf.Valid(args.PrevLogIndex) {
+			reply.ConflictMeta.Term = rf.Logs[args.PrevLogIndex].Term
+			reply.ConflictMeta.Index = rf.FirstEntry(args.PrevLogIndex)
+		}
+		reply.ConflictMeta.Length = len(rf.Logs)
+
+		Debug(dLog, "s%d log matching fails; log=%#v, args=%#v", rf.me, le, args)
 		return
 	}
 
@@ -214,8 +227,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.persist()
 
-	// log.Printf("arg_logs=%v logs=%v leader_commit=%d commit=%d\n", args.Entries, rf.Logs, args.LeaderCommit, rf.commitIndex)
-
 	lastIndex := len(rf.Logs) - 1
 
 	prevCommit := rf.commitIndex
@@ -224,13 +235,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if prevCommit != rf.commitIndex {
-		log.Printf("s%d commit from %d to %d", rf.me, prevCommit+1, rf.commitIndex)
+		Debug(dLog, "s%d commit from %d to %d", rf.me, prevCommit+1, rf.commitIndex)
 		go rf.ApplyCommand(prevCommit+1, rf.commitIndex)
 	}
 
 	reply.Success = true
 	reply.CurrentTerm = rf.CurrentTerm
 
+}
+
+func (rf *Raft) Valid(index int) bool {
+	return index > 0 && index < len(rf.Logs)
+}
+
+func (rf *Raft) FirstEntry(j int) int {
+	target := rf.Logs[j].Term
+	res := j
+	for i := j - 1; i > 0 && rf.Logs[i].Term == target; i-- {
+		res = i
+	}
+	return res
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -271,12 +295,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	lastEntry := rf.Logs[len(rf.Logs)-1]
 	isLeaderUpToDate := (args.LastLogTerm > lastEntry.Term) || (args.LastLogTerm == lastEntry.Term && args.LastLogIndex >= len(rf.Logs)-1)
 	if !isLeaderUpToDate {
-		log.Printf("s%d rejects vote since leader is not up to date; args=%#v last_entry=%#v index=%d", rf.me, args, lastEntry, len(rf.Logs)-1)
+		Debug(dVote, "s%d rejects vote since leader is not up to date; args=%#v last_entry=%#v index=%d", rf.me, args, lastEntry, len(rf.Logs)-1)
 		reply.VoteGranted = false
 		return
 	}
 
-	if rf.CurrentTerm < args.Term || rf.VoteFor == NO_LEADER || rf.VoteFor == args.CandidateId {
+	if rf.VoteFor == NO_LEADER || rf.VoteFor == args.CandidateId {
 		rf.timeout = getRandomTimeout()
 		rf.CurrentTerm = args.Term
 		if rf.status == LEADER {
@@ -292,7 +316,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// follower grants vote to other candidate
 	reply.VoteGranted = false
-	log.Printf("s%d reject votes; args=%#v reply=%#v current_term=%d vote_for=%d", rf.me, args, reply, rf.CurrentTerm, rf.VoteFor)
+	Debug(dVote, "s%d reject votes; args=%#v reply=%#v current_term=%d vote_for=%d", rf.me, args, reply, rf.CurrentTerm, rf.VoteFor)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -353,7 +377,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) { // index, term, is
 		index = len(rf.Logs)
 		rf.Logs = append(rf.Logs, entry)
 		rf.persist()
-		log.Printf("s%d receives cmd=%v at index=%d\n", rf.me, command, index)
+		Debug(dClient, "s%d receives cmd=%v at index=%d\n", rf.me, command, index)
 	}
 
 	return index, term, isLeader
@@ -417,11 +441,11 @@ func (rf *Raft) heartbeats() {
 						} else {
 							errMsg = "candidate"
 						}
-						log.Printf("s%d(leader) abort AppendEntries since it is now %s", rf.me, errMsg)
+						Debug(dLeader, "s%d(leader) abort AppendEntries since it is now %s", rf.me, errMsg)
 						return
 					}
 
-					log.Printf("heartbeats: s%d s%d;  args=%#v reply=%v\n", rf.me, i, args, reply)
+					Debug(dLeader, "heartbeats: s%d s%d;  args=%#v reply=%v\n", rf.me, i, args, reply)
 
 					if !reply.Success && reply.CurrentTerm > rf.CurrentTerm {
 						rf.CurrentTerm = reply.CurrentTerm
@@ -432,10 +456,10 @@ func (rf *Raft) heartbeats() {
 						return
 					}
 					if args.Entries != nil {
-						log.Printf("s%d sends logs to s%d from %d to %d\n", rf.me, i, rf.nextIndex[i], rf.nextIndex[i]+len(args.Entries)-1)
+						Debug(dLog, "s%d sends logs to s%d from %d to %d\n", rf.me, i, rf.nextIndex[i], rf.nextIndex[i]+len(args.Entries)-1)
 
 						// rollback matchIndex quickly
-						rf.logMatching(reply.Success, i, args.PrevLogIndex, len(args.Entries))
+						rf.logMatching(&reply, i, args.PrevLogIndex, len(args.Entries))
 					}
 
 					if reply.Success && len(logs) > 0 {
@@ -459,18 +483,38 @@ func (rf *Raft) getLogsInBatch(from int, size int) []LogEntry {
 	return rf.Logs[from:end]
 }
 
-func (rf *Raft) logMatching(status bool, server int, index int, size int) {
+func (rf *Raft) logMatching(reply *AppendEntriesReply, server int, index int, size int) {
 	// Avoid duplicate rpc call.
 	// Make it idempotent.
 	if index+1 != rf.nextIndex[server] {
 		return
 	}
-	if status {
+
+	if reply.Success {
 		rf.nextIndex[server] += size
 		rf.matchIndex[server] = rf.nextIndex[server] - 1
-
 	} else {
-		rf.nextIndex[server] -= 1
+		// rollback nextIndex
+		meta := reply.ConflictMeta
+		if meta.Index == 0 {
+			rf.nextIndex[server] = meta.Length
+		} else {
+			j := -1
+			for i := index; i > 0; i-- {
+				term := rf.Logs[i].Term
+				if term == meta.Term {
+					j = i
+					break
+				} else if term < meta.Term {
+					break
+				}
+			}
+			if j > -1 { // conflict term found
+				rf.nextIndex[server] = j
+			} else {
+				rf.nextIndex[server] = meta.Index
+			}
+		}
 	}
 }
 
@@ -512,7 +556,7 @@ func (rf *Raft) updateCommitIndex() {
 		}
 	}
 	if old != rf.commitIndex {
-		log.Printf("s%d(leader) commit index from=%d to=%d match_index=%#v\n", rf.me, old+1, rf.commitIndex, rf.matchIndex)
+		Debug(dCommit, "s%d(leader) commit index from=%d to=%d match_index=%#v\n", rf.me, old+1, rf.commitIndex, rf.matchIndex)
 		go rf.ApplyCommand(old+1, rf.commitIndex)
 	}
 }
@@ -555,7 +599,7 @@ func (rf *Raft) AskVote(ctx context.Context, wg *sync.WaitGroup, server int, can
 			}
 		}
 	}
-	log.Printf("RequestVote: s%d s%d args=%#v reply=%#v", rf.me, server, args, reply)
+	Debug(dVote, "RequestVote: s%d s%d args=%#v reply=%#v", rf.me, server, args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.status != CANDIDATE || rf.CurrentTerm != term {
@@ -641,14 +685,15 @@ func (rf *Raft) ticker() {
 				rf.status = FOLLOWER
 				rf.VoteFor = NO_LEADER
 				rf.persist()
-				log.Printf("s%d loses election in term %d\n", rf.me, rf.CurrentTerm)
+				Debug(dVote, "s%d loses election in term %d\n", rf.me, rf.CurrentTerm)
 			} else {
-				log.Printf("s%d wins election in term %d\n", rf.me, rf.CurrentTerm)
+				Debug(dVote, "s%d wins election in term %d\n", rf.me, rf.CurrentTerm)
 			}
 			rf.mu.Unlock()
 		} else {
 			rf.mu.Unlock()
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
