@@ -94,6 +94,8 @@ const (
 
 const NO_LEADER = -1
 
+const BATCH_SIZE = 50
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -179,6 +181,7 @@ func getRandomTimeout() time.Time {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	if rf.CurrentTerm > args.Term { // Follower spots a stale leader.
 		reply.CurrentTerm = rf.CurrentTerm
 		reply.Success = false
@@ -191,7 +194,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.CurrentTerm = args.Term
 		rf.status = FOLLOWER
 		rf.VoteFor = args.LeaderId
-		rf.persist()
 	}
 
 	isLogMatched := args.PrevLogIndex == 0 || (rf.Valid(args.PrevLogIndex) && (rf.Logs[args.PrevLogIndex].Term == args.PrevLogTerm))
@@ -225,7 +227,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.Logs = append(rf.Logs, args.Entries[j])
 		}
 	}
-	rf.persist()
 
 	lastIndex := currentIndex + len(args.Entries) - 1
 
@@ -285,6 +286,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	reply.Term = rf.CurrentTerm
 	if rf.CurrentTerm > args.Term {
 		reply.VoteGranted = false
@@ -296,7 +298,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.CurrentTerm = args.Term
 		rf.status = FOLLOWER
 		rf.VoteFor = NO_LEADER
-		rf.persist()
 	}
 
 	lastEntry := rf.Logs[len(rf.Logs)-1]
@@ -315,7 +316,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.VoteFor = args.CandidateId
 		reply.VoteGranted = true
 		reply.Term = rf.CurrentTerm
-		rf.persist()
 		return
 	}
 
@@ -427,8 +427,7 @@ func (rf *Raft) heartbeats() {
 				LeaderCommit: rf.commitIndex,
 			}
 			reply := AppendEntriesReply{}
-			batchSize := 10
-			logs := rf.getLogsInBatch(rf.nextIndex[i], batchSize)
+			logs := rf.getLogsInBatch(rf.nextIndex[i], BATCH_SIZE)
 			args.PrevLogIndex = rf.nextIndex[i] - 1
 			args.PrevLogTerm = rf.Logs[rf.nextIndex[i]-1].Term
 			if logs != nil {
@@ -623,7 +622,6 @@ func (rf *Raft) AskVote(ctx context.Context, wg *sync.WaitGroup, server int, can
 		rf.CurrentTerm = reply.Term
 		rf.status = FOLLOWER
 		out <- -1
-		rf.persist()
 	} else if reply.VoteGranted {
 		out <- 1
 	} else {
@@ -692,11 +690,11 @@ func (rf *Raft) ticker() {
 			if rf.status != LEADER {
 				rf.status = FOLLOWER
 				rf.VoteFor = NO_LEADER
-				rf.persist()
 				Debug(dVote, "s%d loses election in term %d\n", rf.me, rf.CurrentTerm)
 			} else {
 				Debug(dVote, "s%d wins election in term %d\n", rf.me, rf.CurrentTerm)
 			}
+			rf.persist()
 			rf.mu.Unlock()
 		} else {
 			rf.mu.Unlock()
