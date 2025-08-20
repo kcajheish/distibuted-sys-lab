@@ -194,7 +194,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.persist()
 	}
 
-	isLogMatched := args.PrevLogIndex == 0 || (args.PrevLogIndex < len(rf.Logs) && (rf.Logs[args.PrevLogIndex].Term == args.PrevLogTerm))
+	isLogMatched := args.PrevLogIndex == 0 || (rf.Valid(args.PrevLogIndex) && (rf.Logs[args.PrevLogIndex].Term == args.PrevLogTerm))
 	if !isLogMatched {
 		var le LogEntry
 		if (args.PrevLogIndex) < len(rf.Logs) {
@@ -205,7 +205,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.ConflictMeta.Term = rf.Logs[args.PrevLogIndex].Term
 			reply.ConflictMeta.Index = rf.FirstEntry(args.PrevLogIndex)
 		}
-		reply.ConflictMeta.Length = len(rf.Logs)
+		reply.ConflictMeta.Length = len(rf.Logs) - 1
 
 		Debug(dLog, "s%d log matching fails; log=%#v, args=%#v", rf.me, le, args)
 		return
@@ -227,7 +227,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.persist()
 
-	lastIndex := len(rf.Logs) - 1
+	lastIndex := currentIndex + len(args.Entries) - 1
 
 	prevCommit := rf.commitIndex
 	if args.LeaderCommit > rf.commitIndex {
@@ -292,6 +292,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
+	if rf.CurrentTerm < args.Term {
+		rf.CurrentTerm = args.Term
+		rf.status = FOLLOWER
+		rf.VoteFor = NO_LEADER
+		rf.persist()
+	}
+
 	lastEntry := rf.Logs[len(rf.Logs)-1]
 	isLeaderUpToDate := (args.LastLogTerm > lastEntry.Term) || (args.LastLogTerm == lastEntry.Term && args.LastLogIndex >= len(rf.Logs)-1)
 	if !isLeaderUpToDate {
@@ -301,8 +308,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if rf.VoteFor == NO_LEADER || rf.VoteFor == args.CandidateId {
-		rf.timeout = getRandomTimeout()
-		rf.CurrentTerm = args.Term
 		if rf.status == LEADER {
 			Debug(dInfo, "AppendEntries: s%d becomes follower", rf.me)
 		}
@@ -402,7 +407,7 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-var heartbeatInterval time.Duration = time.Duration(50 * time.Millisecond)
+var heartbeatInterval time.Duration = time.Duration(100 * time.Millisecond)
 
 func (rf *Raft) heartbeats() {
 	for !rf.killed() {
@@ -462,7 +467,7 @@ func (rf *Raft) heartbeats() {
 						rf.logMatching(&reply, i, args.PrevLogIndex, len(args.Entries))
 					}
 
-					if reply.Success && len(logs) > 0 {
+					if reply.Success && len(args.Entries) > 0 {
 						rf.updateCommitIndex()
 					}
 
@@ -486,6 +491,7 @@ func (rf *Raft) getLogsInBatch(from int, size int) []LogEntry {
 func (rf *Raft) logMatching(reply *AppendEntriesReply, server int, index int, size int) {
 	// Avoid duplicate rpc call.
 	// Make it idempotent.
+	// index: previous log index
 	if index+1 != rf.nextIndex[server] {
 		return
 	}
@@ -500,8 +506,9 @@ func (rf *Raft) logMatching(reply *AppendEntriesReply, server int, index int, si
 			rf.nextIndex[server] = meta.Length
 		} else {
 			j := -1
+			term := -1
 			for i := index; i > 0; i-- {
-				term := rf.Logs[i].Term
+				term = rf.Logs[i].Term
 				if term == meta.Term {
 					j = i
 					break
@@ -509,7 +516,7 @@ func (rf *Raft) logMatching(reply *AppendEntriesReply, server int, index int, si
 					break
 				}
 			}
-			if j > -1 { // conflict term found
+			if j > -1 && term == meta.Term { // conflict term found
 				rf.nextIndex[server] = j
 			} else {
 				rf.nextIndex[server] = meta.Index
@@ -537,7 +544,7 @@ func (rf *Raft) updateCommitIndex() {
 	}
 
 	old := rf.commitIndex
-	for index := rf.commitIndex + 1; index < len(rf.Logs); index++ {
+	for index := old + 1; index < len(rf.Logs); index++ {
 		if rf.Logs[index].Term != rf.CurrentTerm {
 			continue
 		}
@@ -555,6 +562,7 @@ func (rf *Raft) updateCommitIndex() {
 			rf.commitIndex = index
 		}
 	}
+
 	if old != rf.commitIndex {
 		Debug(dCommit, "s%d(leader) commit index from=%d to=%d match_index=%#v\n", rf.me, old+1, rf.commitIndex, rf.matchIndex)
 		go rf.ApplyCommand(old+1, rf.commitIndex)
