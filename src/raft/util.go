@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-const debug = true
+const DEBUG = true
 
 type logTopic string
 
@@ -37,7 +37,7 @@ func init() {
 }
 
 func Debug(topic logTopic, format string, a ...interface{}) {
-	if debug {
+	if DEBUG {
 		time := time.Since(debugStart).Microseconds()
 		time /= 100
 		prefix := fmt.Sprintf("%06d %v ", time, string(topic))
@@ -47,7 +47,7 @@ func Debug(topic logTopic, format string, a ...interface{}) {
 }
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if debug {
+	if DEBUG {
 		log.Printf(format, a...)
 	}
 	return
