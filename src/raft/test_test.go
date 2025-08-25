@@ -785,7 +785,7 @@ func TestPersist22C(t *testing.T) {
 	cfg.end()
 }
 
-func TestPersist32C(t *testing.T) {
+func TestPersist32C(t *testing.T) { //X
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -1139,10 +1139,12 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 
 		if disconnect {
 			cfg.disconnect(victim)
+			log.Printf("disconnect s%d\n", victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
 		if crash {
 			cfg.crash1(victim)
+			log.Printf("crash s%d\n", victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
 
@@ -1169,12 +1171,14 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			// reconnect a follower, who maybe behind and
 			// needs to rceive a snapshot to catch up.
 			cfg.connect(victim)
+			log.Printf("reconnect disconnect s%d\n", victim)
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()
 		}
 		if crash {
 			cfg.start1(victim, cfg.applierSnap)
 			cfg.connect(victim)
+			log.Printf("crash s%d\n", victim)
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()
 		}
@@ -1186,11 +1190,11 @@ func TestSnapshotBasic2D(t *testing.T) {
 	snapcommon(t, "Test (2D): snapshots basic", false, true, false)
 }
 
-func TestSnapshotInstall2D(t *testing.T) {
+func TestSnapshotInstall2D(t *testing.T) { // x
 	snapcommon(t, "Test (2D): install snapshots (disconnect)", true, true, false)
 }
 
-func TestSnapshotInstallUnreliable2D(t *testing.T) {
+func TestSnapshotInstallUnreliable2D(t *testing.T) { // x
 	snapcommon(t, "Test (2D): install snapshots (disconnect+unreliable)",
 		true, false, false)
 }
@@ -1206,7 +1210,7 @@ func TestSnapshotInstallUnCrash2D(t *testing.T) {
 // do the servers persist the snapshots, and
 // restart using snapshot along with the
 // tail of the log?
-func TestSnapshotAllCrash2D(t *testing.T) {
+func TestSnapshotAllCrash2D(t *testing.T) { // x
 	servers := 3
 	iters := 5
 	cfg := make_config(t, servers, false, true)
