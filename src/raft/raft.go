@@ -137,6 +137,8 @@ const MAX_LOGS = 300
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	return rf.CurrentTerm, rf.status == LEADER
 }
 
@@ -917,6 +919,7 @@ func (rf *Raft) ticker() {
 			rf.VoteFor = rf.me
 			rf.status = CANDIDATE
 			rf.timeout = getRandomTimeout()
+			timeout := rf.timeout
 			Debug(dTimer, "s%d starts election with term %d", rf.me, rf.CurrentTerm)
 			var wg sync.WaitGroup
 			wg.Add(len(rf.peers) - 1)
@@ -934,7 +937,7 @@ func (rf *Raft) ticker() {
 			n := 1
 			votes := 1
 			run := true
-			for rf.timeout.After(time.Now()) && run {
+			for timeout.After(time.Now()) && run {
 				select {
 				case v := <-out:
 					rf.mu.Lock()
@@ -958,6 +961,7 @@ func (rf *Raft) ticker() {
 					rf.mu.Unlock()
 				default:
 					// do nothing
+					time.Sleep(10 * time.Millisecond)
 				}
 			}
 			cancel()
