@@ -365,15 +365,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	Debug(dLog, "AppendEntries s%d args=%+v reply=%+v state=%s", rf.me, args, reply, rf.StateToString())
 
 	currentIndex := args.PrevLogIndex + 1
-	if currentIndex <= rf.Size() && len(args.Entries) > 0 {
-		if rf.LogAt(currentIndex).Term != args.Entries[0].Term {
-			rf.Logs = rf.Slice(rf.LastIncludedIndex+1, currentIndex)
-		}
-	}
-
 	for i, j := currentIndex, 0; i < currentIndex+len(args.Entries); i, j = i+1, j+1 {
 		if i <= rf.Size() {
 			index := rf.Index(i)
+			if rf.LogAt(i).Term != args.Entries[j].Term {
+				rf.Logs = rf.Logs[:index+1]
+			}
 			rf.Logs[index] = args.Entries[j]
 		} else {
 			rf.Logs = append(rf.Logs, args.Entries[j])
