@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-const DEBUG = true
+const DEBUG = false
 
 type logTopic string
 

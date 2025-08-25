@@ -171,7 +171,7 @@ func (rf *Raft) readPersist(data []byte) {
 	d := labgob.NewDecoder(r)
 	var p Persistent
 	var s SnapshotMeta
-	if (d.Decode(&p.CurrentTerm) != nil) || (d.Decode(&p.VoteFor) != nil) || (d.Decode(&p.Logs) != nil) {
+	if (d.Decode(&p.CurrentTerm) != nil) || (d.Decode(&p.VoteFor) != nil) || (d.Decode(&p.Logs) != nil) || (d.Decode(&s.LastIncludedIndex) != nil) || (d.Decode(&s.LastIncludedTerm) != nil) {
 		log.Fatalf("s%d can't read persist data", rf.me)
 	} else {
 		rf.Persistent = p
@@ -1013,6 +1013,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	if rf.persister.SnapshotSize() > 0 {
+		rf.commitIndex = rf.LastIncludedIndex
+		rf.lastApplied = rf.LastIncludedIndex
+		go rf.ApplySnapshot(rf.persister.ReadSnapshot(), rf.LastIncludedTerm, rf.LastIncludedIndex)
+	}
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
