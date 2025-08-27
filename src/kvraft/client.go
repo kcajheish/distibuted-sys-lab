@@ -1,13 +1,28 @@
 package kvraft
 
-import "6.824/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"log"
+	"math/big"
+	"sync/atomic"
+	"time"
 
+	"6.824/labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+
+	lastLeader int
+
+	LastReqId uint64
+}
+
+var counter atomic.Uint64
+
+func (ck *Clerk) NextID() uint64 {
+	return counter.Add(1)
 }
 
 func nrand() int64 {
@@ -24,7 +39,6 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	return ck
 }
 
-//
 // fetch the current value for a key.
 // returns "" if the key does not exist.
 // keeps trying forever in the face of all other errors.
@@ -35,14 +49,46 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // the types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
-//
 func (ck *Clerk) Get(key string) string {
+	args := GetArgs{}
+	args.Key = key
+	args.ID = ck.NextID()
+	args.LastReqId = ck.LastReqId
 
-	// You will have to modify this function.
-	return ""
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			server := (ck.lastLeader + i) % len(ck.servers)
+			var reply GetReply
+			ok := ck.servers[server].Call("KVServer.Get", &args, &reply)
+			if ok && reply.Err == OK {
+				ck.lastLeader = server
+				ck.LastReqId = args.ID
+				DPrintf("client to s%d args=%+v reply=%+v", i, args, reply)
+				return reply.Value
+			}
+
+			if ok && reply.Err == ErrNoKey {
+				ck.lastLeader = server
+				ck.LastReqId = args.ID
+				return ""
+			}
+
+			if ok && reply.Err == ErrNotCommitted {
+				// retry the same server in the next loop
+				i = i - 1
+			}
+
+			if !ok || ok && (reply.Err == ErrWrongLeader) {
+				// try the next kv server
+				continue
+			}
+
+			log.Panicf("unknow reply state; args=%+v reply=%+v", args, reply)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
-//
 // shared by Put and Append.
 //
 // you can send an RPC with code like this:
@@ -51,9 +97,35 @@ func (ck *Clerk) Get(key string) string {
 // the types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
-//
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	args := PutAppendArgs{}
+	args.Op = op
+	args.Key = key
+	args.Value = value
+	args.ID = ck.NextID()
+	args.LastReqId = ck.LastReqId
+
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			server := (ck.lastLeader + i) % len(ck.servers)
+			var reply PutAppendReply
+
+			ok := ck.servers[server].Call("KVServer.PutAppend", &args, &reply)
+			if ok && reply.Err == OK {
+				ck.lastLeader = server
+				ck.LastReqId = args.ID
+				DPrintf("client to s%d args=%+v reply=%+v", i, args, reply)
+				return
+			}
+
+			if !ok || ok && (reply.Err == ErrWrongLeader) {
+				continue
+			}
+
+			log.Panicf("unknow reply state; args=%+v reply=%+v", args, reply)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
