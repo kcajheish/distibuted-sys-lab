@@ -1,0 +1,4 @@
+Test: many clients (3A) ...
+  ... Passed --  16.6  5  1700  735
+PASS
+ok  	6.824/kvraft	16.936s

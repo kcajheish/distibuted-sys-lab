@@ -13,16 +13,13 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-
+	ID         int64
 	lastLeader int
-
-	LastReqId uint64
+	count      atomic.Int64
 }
 
-var counter atomic.Uint64
-
-func (ck *Clerk) NextID() uint64 {
-	return counter.Add(1)
+func (ck *Clerk) NextReqID() int64 {
+	return ck.count.Add(1)
 }
 
 func nrand() int64 {
@@ -36,6 +33,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.ID = nrand()
 	return ck
 }
 
@@ -52,8 +50,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
-	args.ID = ck.NextID()
-	args.LastReqId = ck.LastReqId
+	args.ID = ck.NextReqID()
+	args.ClientID = ck.ID
 
 	for {
 		for i := 0; i < len(ck.servers); i++ {
@@ -62,14 +60,12 @@ func (ck *Clerk) Get(key string) string {
 			ok := ck.servers[server].Call("KVServer.Get", &args, &reply)
 			if ok && reply.Err == OK {
 				ck.lastLeader = server
-				ck.LastReqId = args.ID
 				DPrintf("client to s%d args=%+v reply=%+v", i, args, reply)
 				return reply.Value
 			}
 
 			if ok && reply.Err == ErrNoKey {
 				ck.lastLeader = server
-				ck.LastReqId = args.ID
 				return ""
 			}
 
@@ -102,8 +98,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Op = op
 	args.Key = key
 	args.Value = value
-	args.ID = ck.NextID()
-	args.LastReqId = ck.LastReqId
+	args.ID = ck.NextReqID()
+	args.ClientID = ck.ID
 
 	for {
 		for i := 0; i < len(ck.servers); i++ {
@@ -113,7 +109,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			ok := ck.servers[server].Call("KVServer.PutAppend", &args, &reply)
 			if ok && reply.Err == OK {
 				ck.lastLeader = server
-				ck.LastReqId = args.ID
 				DPrintf("client to s%d args=%+v reply=%+v", i, args, reply)
 				return
 			}

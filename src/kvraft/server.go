@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"errors"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -11,7 +12,17 @@ import (
 	"6.824/raft"
 )
 
-const Debug = false
+const Debug = true
+
+var KeyNotFoundErr = errors.New("no key")
+
+var DuplicateError = errors.New("duplicate error")
+
+const GET = "Get"
+
+const PUT = "Put"
+
+const APPEND = "Append"
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -24,10 +35,11 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Name  string // name of the operation e.g. Put, Get...etc
-	Key   string
-	Value string
-	ID    uint64
+	Name     string // name of the operation e.g. Put, Get...etc
+	Key      string
+	Value    string
+	ID       int64
+	ClientID int64
 }
 
 type KVServer struct {
@@ -41,209 +53,148 @@ type KVServer struct {
 
 	// Your definitions here.
 
-	counter    atomic.Uint64
-	next       chan interface{}
-	store      map[string]string
-	done       map[uint64]chan bool
-	apply      map[uint64]raft.ApplyMsg
-	reqToOpID  map[uint64]uint64
-	indexToOp  map[int]uint64
-	opToIndex  map[uint64]int
-	reqToReply map[uint64]interface{}
-	opIDToReq  map[uint64]uint64
-}
+	store map[string][]byte
+	wait  map[int64]chan any
 
-func (kv *KVServer) NextID() uint64 {
-	return kv.counter.Add(1)
-}
-
-func (kv *KVServer) ValidateOp(op Op, execOp Op) bool {
-	return op.ID == execOp.ID
-}
-
-func (kv *KVServer) Clear(reqID uint64) {
-	if _, ok := kv.reqToOpID[reqID]; !ok {
-		return
-	}
-	opID := kv.reqToOpID[reqID]
-	index := kv.opToIndex[opID]
-	delete(kv.apply, opID)
-	close(kv.done[opID])
-	delete(kv.done, opID)
-	delete(kv.reqToOpID, reqID)
-	delete(kv.opToIndex, opID)
-	delete(kv.indexToOp, index)
-	delete(kv.reqToReply, reqID)
-	delete(kv.opIDToReq, opID)
+	lastReqID map[int64]int64
+	lastReply map[int64]any
+	lastApply map[int64]any
 }
 
 func (kv *KVServer) InitMap() {
-	kv.store = make(map[string]string)
-	kv.done = make(map[uint64]chan bool)
-	kv.apply = make(map[uint64]raft.ApplyMsg)
-	kv.reqToOpID = make(map[uint64]uint64)
-	kv.indexToOp = make(map[int]uint64)
-	kv.opToIndex = make(map[uint64]int)
-	kv.reqToReply = make(map[uint64]interface{})
-	kv.opIDToReq = make(map[uint64]uint64)
+	kv.store = make(map[string][]byte)
+	kv.wait = make(map[int64]chan any)
+	kv.lastReqID = make(map[int64]int64)
+	kv.lastReply = make(map[int64]any)
+	kv.lastApply = make(map[int64]any)
+}
+
+func (kv *KVServer) cache(clientID int64, reply any) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.lastReply[clientID] = reply
+
+}
+
+func (kv *KVServer) cacheApplyResult(clientID int64, res any) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.lastApply[clientID] = res
+}
+
+func (kv *KVServer) getApplyResultFromCache(cliendID int64) any {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if res, ok := kv.lastApply[cliendID]; ok {
+		return res
+	}
+	return nil
+}
+
+func (kv *KVServer) getFromCache(clientID int64) any {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if reply, ok := kv.lastReply[clientID]; ok {
+		return reply
+	}
+	return nil
+}
+
+func (kv *KVServer) setWait(clientID int64) chan any {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.wait[clientID] = make(chan any)
+	return kv.wait[clientID]
+}
+
+func (kv *KVServer) getWait(clientID int64) chan any { // called by process engine
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if w, ok := kv.wait[clientID]; ok {
+		delete(kv.wait, clientID)
+		return w
+	}
+	return nil
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	kv.mu.Lock()
-	if prevReply, ok := kv.reqToReply[args.ID]; ok { // duplicated request
-		kv.mu.Unlock()
-		*reply = prevReply.(GetReply)
+	if prevReply, ok := kv.getFromCache(args.ClientID).(*GetReply); ok && prevReply != nil && prevReply.ID == args.ID {
+		*reply = *prevReply
 		return
 	}
 
-	op := Op{}
-	op.ID = kv.NextID()
-	op.Key = args.Key
-	op.Name = "Get"
+	op := Op{
+		ID:       args.ID,
+		Key:      args.Key,
+		Name:     GET,
+		ClientID: args.ClientID,
+	}
 
-	kv.done[op.ID] = make(chan bool)
-
-	index, _, isLeader := kv.rf.Start(op)
+	_, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
-		kv.mu.Unlock()
 		reply.Err = ErrWrongLeader
 		return
 	}
 
-	if opID, ok := kv.indexToOp[index]; ok {
-		kv.done[opID] <- false
-		reqID := kv.opIDToReq[opID]
-		kv.Clear(reqID)
+	wait := kv.setWait(args.ClientID)
+	res, ok := <-wait
+	close(wait)
+	if !ok {
+		panic("Get: can't close a channel that client waits for")
 	}
 
-	kv.indexToOp[index] = op.ID
-	kv.reqToOpID[args.LastReqId] = op.ID
-	kv.opToIndex[op.ID] = index
-	kv.opIDToReq[op.ID] = args.ID
-	done := kv.done[op.ID]
-	kv.mu.Unlock()
-
-	status, ok := <-done
-	defer func() {
-		kv.next <- struct{}{}
-	}()
-
-	// Ask the client to try another server when either two happen:
-	// Channel is already closed because the server is killed.
-	// Command is not committed due to re-election;
-	if !ok || !status {
-		reply.Err = ErrNotCommitted
-		return
-	}
-
-	msg := kv.apply[op.ID]
-	if msg.CommandIndex != index {
-		// out of order detected
-		log.Panicf("ApplyMsg out of order apply_msg=%+v, expected_index=%d", msg, index)
-	}
-
-	execOp := msg.Command.(Op)
-	if ok := kv.ValidateOp(op, execOp); !ok {
-		log.Panicf("ApplyMsg out of order op=%+v, exec_op=%+v", op, execOp)
-	}
-
-	val, ok := kv.store[args.Key]
-	if ok {
-		reply.Value = val
-		reply.Err = OK
+	if err, ok := res.(error); ok {
+		if errors.Is(err, KeyNotFoundErr) {
+			reply.Value = ""
+			reply.Err = ErrNoKey
+		} else {
+			panic("Get: unknow error ")
+		}
 	} else {
-		reply.Err = ErrNoKey
-	}
-
-	kv.mu.Lock()
-	kv.reqToReply[args.ID] = *reply
-
-	if args.LastReqId != 0 {
-		kv.Clear(args.LastReqId)
-	}
-	kv.mu.Unlock()
-}
-
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.mu.Lock()
-	if prevReply, ok := kv.reqToReply[args.ID]; ok {
-		kv.mu.Unlock()
-		// duplicate client request
-		*reply = prevReply.(PutAppendReply)
-		return
-	}
-
-	if args.LastReqId != 0 {
-		kv.Clear(args.LastReqId)
-	}
-
-	op := Op{}
-	op.Name = args.Op
-	op.ID = kv.NextID()
-	op.Key = args.Key
-	op.Value = args.Value
-
-	kv.done[op.ID] = make(chan bool)
-
-	index, _, isLeader := kv.rf.Start(op)
-	if !isLeader {
-		kv.mu.Unlock()
-		reply.Err = ErrWrongLeader
-		return
-	}
-
-	if opID, ok := kv.indexToOp[index]; ok {
-		kv.done[opID] <- false
-		reqID := kv.opIDToReq[opID]
-		kv.Clear(reqID)
-	}
-
-	kv.indexToOp[index] = op.ID
-	done := kv.done[op.ID]
-	kv.mu.Unlock()
-
-	status, ok := <-done
-	defer func() {
-		kv.next <- struct{}{}
-	}()
-
-	if !ok || !status {
-		reply.Err = ErrNotCommitted
-		return
-	}
-
-	msg := kv.apply[op.ID]
-	if msg.CommandIndex != index {
-		// out of order detected
-		log.Panicf("ApplyMsg out of order apply_msg=%+v, expected_index=%d", msg, index)
-	}
-
-	execOp := msg.Command.(Op)
-	if ok := kv.ValidateOp(op, execOp); !ok {
-		log.Panicf("ApplyMsg out of order op=%+v, exec_op=%+v", op, execOp)
-	}
-
-	if _, ok := kv.store[op.Key]; !ok {
-		kv.store[args.Key] = ""
-	}
-
-	switch op.Name {
-	case "Put":
-		kv.store[args.Key] = args.Value
-	case "Append":
-		kv.store[args.Key] = kv.store[args.Key] + args.Value
-	default:
-		log.Fatalf("unexpected operations")
+		reply.Value, ok = res.(string)
+		if !ok {
+			panic("Get:unexpected type; should be string value")
+		}
 	}
 
 	reply.Err = OK
+	reply.ID = args.ClientID
 
-	kv.mu.Lock()
-	kv.reqToReply[args.ID] = *reply
-	if args.LastReqId != 0 {
-		kv.Clear(args.LastReqId)
+	kv.cache(args.ClientID, reply)
+}
+
+func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	if prevReply, ok := kv.getFromCache(args.ClientID).(*PutAppendReply); ok && prevReply != nil && prevReply.ID == args.ID {
+		*reply = *prevReply
+		return
 	}
-	kv.mu.Unlock()
+
+	op := Op{
+		Name:     args.Op,
+		ID:       args.ID,
+		Key:      args.Key,
+		Value:    args.Value,
+		ClientID: args.ClientID,
+	}
+
+	wait := kv.setWait(args.ClientID)
+
+	_, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	_, ok := <-wait
+	close(wait)
+
+	if !ok {
+		panic("PutAppend: can't close a channel that client waits for")
+	}
+
+	reply.ID = op.ID
+	reply.Err = OK
+	kv.cache(args.ClientID, reply)
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -258,13 +209,61 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	time.Sleep(10 * time.Millisecond)
-	close(kv.next)
 	DPrintf("kv server %d killed.", kv.me)
 }
 
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) process() {
+	for msg := range kv.applyCh {
+		if msg.CommandValid {
+			op := msg.Command.(Op)
+
+			if reqID, ok := kv.lastReqID[op.ClientID]; ok && reqID >= op.ClientID {
+				// duplicate commands
+				wait := kv.getWait(op.ClientID)
+				if wait != nil {
+					wait <- kv.getApplyResultFromCache(op.ClientID)
+				}
+				continue
+			}
+			kv.lastReqID[op.ClientID] = op.ID
+			var res any
+			switch op.Name {
+			case GET:
+				if val, ok := kv.store[op.Key]; ok {
+					res = string(val)
+				} else {
+					res = KeyNotFoundErr
+				}
+			case PUT:
+				kv.store[op.Key] = []byte(op.Value)
+				res = struct{}{}
+			case APPEND:
+				if _, ok := kv.store[op.Key]; !ok {
+					kv.store[op.Key] = []byte(op.Value)
+				} else {
+					kv.store[op.Key] = append(kv.store[op.Key], []byte(op.Value)...)
+				}
+				res = struct{}{}
+			default:
+				panic("unknow operation")
+
+			}
+
+			kv.cacheApplyResult(op.ClientID, res)
+
+			wait := kv.getWait(op.ClientID)
+			if wait != nil {
+				wait <- res
+			}
+
+		}
+	}
+	DPrintf("kv server %d stop receiving messages.", kv.me)
 }
 
 // servers[] contains the ports of the set of
@@ -291,29 +290,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.next = make(chan interface{})
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.InitMap()
 
 	// You may need initialization code here.
-	go func() {
-		for msg := range kv.applyCh {
-			if msg.CommandValid {
-				op := msg.Command.(Op)
-				kv.mu.Lock()
-				kv.apply[op.ID] = msg
-				done := kv.done[op.ID]
-				kv.mu.Unlock()
-				done <- true
-				<-kv.next
-			}
-		}
-		DPrintf("kv server %d stop receiving messages.", kv.me)
-
-		for _, ch := range kv.done {
-			close(ch)
-		}
-	}()
+	go kv.process()
 
 	return kv
 }
