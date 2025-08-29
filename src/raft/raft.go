@@ -667,8 +667,8 @@ func (rf *Raft) heartbeats() {
 					Data:              rf.persister.ReadSnapshot(),
 				}
 				reply := InstallSnapshotReply{}
-				go func(i int, args InstallSnapshotArgs, reply InstallSnapshotReply) {
-					if rf.sendInstallSnapshot(i, &args, &reply) {
+				go func(i int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+					if rf.sendInstallSnapshot(i, args, reply) {
 						rf.mu.Lock()
 						defer rf.mu.Unlock()
 
@@ -693,13 +693,9 @@ func (rf *Raft) heartbeats() {
 						rf.nextIndex[i] = args.LastIncludedIndex + 1
 						rf.updateCommitIndex()
 					}
-				}(i, args, reply)
+				}(i, &args, &reply)
 
 			} else {
-
-				// if rf.nextIndex[i] <= rf.LastIncludedIndex {
-				// 	log.Panicf("leader forget to install snapshot on a lagging follower")
-				// }
 
 				args := AppendEntriesArgs{
 					Term:         rf.CurrentTerm,
@@ -719,10 +715,11 @@ func (rf *Raft) heartbeats() {
 					args.PrevLogTerm = rf.LogAt(args.PrevLogIndex).Term
 				}
 				if logs != nil {
-					args.Entries = append(args.Entries, logs...)
+					// args.Entries = append(args.Entries, logs...)
+					args.Entries = logs
 				}
-				go func(i int, args AppendEntriesArgs, reply AppendEntriesReply) {
-					if rf.sendAppendEntries(i, &args, &reply) {
+				go func(i int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+					if rf.sendAppendEntries(i, args, reply) {
 						rf.mu.Lock()
 						defer rf.mu.Unlock()
 
@@ -753,7 +750,7 @@ func (rf *Raft) heartbeats() {
 						}
 
 					}
-				}(i, args, reply)
+				}(i, &args, &reply)
 			}
 
 		}
@@ -796,7 +793,7 @@ func (rf *Raft) getLogsInBatch(from int, size int) []LogEntry {
 	return rf.Logs[from:end]
 }
 
-func (rf *Raft) logMatching(reply AppendEntriesReply, server int, index int, size int) {
+func (rf *Raft) logMatching(reply *AppendEntriesReply, server int, index int, size int) {
 	// Avoid duplicate rpc call.
 	// Make it idempotent.
 	// index: previous log index
