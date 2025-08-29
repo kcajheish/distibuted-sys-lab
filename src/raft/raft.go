@@ -80,6 +80,10 @@ type Raft struct {
 
 	leadCond   *sync.Cond
 	followCond *sync.Cond
+
+	fire  chan any
+	round int
+	busy  bool
 }
 
 type Persistent struct {
@@ -589,8 +593,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) { // index, term, is
 		rf.Logs = append(rf.Logs, entry)
 		rf.persist()
 		Debug(dClient, "s%d receives cmd=%+v at index=%d\n", rf.me, command, index)
+		if !rf.busy {
+			rf.fire <- nil
+		}
 	}
-
 	return index, term, isLeader
 }
 
@@ -648,13 +654,25 @@ func (rf *Raft) heartbeats() {
 		for rf.status != LEADER {
 			rf.leadCond.Wait()
 		}
+		wait := make(chan any, len(rf.peers))
+		rf.round += 1
+		rf.busy = true
+		rf.fire = make(chan any)
+		go func() {
+			round := rf.round
+			n := 0
+			size := len(rf.peers) - 1
+			for n < size {
+				<-wait
+				n += 1
+			}
+			if round == rf.round {
+				rf.busy = false
+			}
+		}()
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
-			}
-
-			if rf.status != LEADER {
-				break
 			}
 
 			if rf.LastIncludedIndex > 0 && rf.LastIncludedIndex >= rf.nextIndex[i] {
@@ -693,6 +711,7 @@ func (rf *Raft) heartbeats() {
 						rf.nextIndex[i] = args.LastIncludedIndex + 1
 						rf.updateCommitIndex()
 					}
+					wait <- nil
 				}(i, &args, &reply)
 
 			} else {
@@ -750,12 +769,16 @@ func (rf *Raft) heartbeats() {
 						}
 
 					}
+					wait <- nil
 				}(i, &args, &reply)
 			}
 
 		}
 		rf.mu.Unlock()
-		time.Sleep(heartbeatInterval)
+		select {
+		case <-time.After(heartbeatInterval):
+		case <-rf.fire:
+		}
 	}
 }
 
@@ -1059,6 +1082,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.VoteFor = NO_LEADER
 	rf.timeout = getRandomTimeout()
 	rf.applyCh = applyCh
+	rf.fire = make(chan any)
+	rf.busy = false
 
 	// Your initialization code here (2A, 2B, 2C).
 	size := len(peers)
