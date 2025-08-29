@@ -301,15 +301,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 }
 
 func (rf *Raft) waitUntilTimeout(out chan bool, timeout time.Duration) bool {
-	run := true
 	res := false
-	for run {
-		select {
-		case <-time.After(timeout):
-			run = false
-		case res = <-out:
-			run = false
-		}
+	select {
+	case <-time.After(timeout):
+	case res = <-out:
 	}
 	return res
 }
