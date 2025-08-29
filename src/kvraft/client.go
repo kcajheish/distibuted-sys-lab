@@ -69,11 +69,6 @@ func (ck *Clerk) Get(key string) string {
 				return ""
 			}
 
-			if ok && reply.Err == ErrNotCommitted {
-				// retry the same server in the next loop
-				i = i - 1
-			}
-
 			if !ok || ok && (reply.Err == ErrWrongLeader) {
 				// try the next kv server
 				continue
