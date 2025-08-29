@@ -589,7 +589,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) { // index, term, is
 		rf.persist()
 		Debug(dClient, "s%d receives cmd=%+v at index=%d\n", rf.me, command, index)
 		if !rf.busy {
-			rf.fire <- nil
+			go func() {
+				rf.fire <- nil
+			}()
 		}
 	}
 	return index, term, isLeader
@@ -652,7 +654,7 @@ func (rf *Raft) heartbeats() {
 		wait := make(chan any, len(rf.peers))
 		rf.round += 1
 		rf.busy = true
-		rf.fire = make(chan any)
+		rf.drain(rf.fire)
 		go func() {
 			round := rf.round
 			n := 0
@@ -773,6 +775,16 @@ func (rf *Raft) heartbeats() {
 		select {
 		case <-time.After(heartbeatInterval):
 		case <-rf.fire:
+		}
+	}
+}
+
+func (rf *Raft) drain(ch chan any) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
 		}
 	}
 }
