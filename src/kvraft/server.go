@@ -18,6 +18,8 @@ var KeyNotFoundErr = errors.New("no key")
 
 var DuplicateError = errors.New("duplicate error")
 
+var CmdOverrideByNewLeaderError = errors.New("command override by new leader")
+
 const GET = "Get"
 
 const PUT = "Put"
@@ -53,8 +55,9 @@ type KVServer struct {
 
 	// Your definitions here.
 
-	store map[string][]byte
-	wait  map[int64]chan any
+	store   map[string][]byte
+	wait    map[int64]chan any
+	cmdToOp map[int]Op
 
 	lastReqID map[int64]int64
 	lastReply map[int64]any
@@ -64,27 +67,23 @@ type KVServer struct {
 func (kv *KVServer) InitMap() {
 	kv.store = make(map[string][]byte)
 	kv.wait = make(map[int64]chan any)
+	kv.cmdToOp = make(map[int]Op)
 	kv.lastReqID = make(map[int64]int64)
 	kv.lastReply = make(map[int64]any)
 	kv.lastApply = make(map[int64]any)
+
 }
 
 func (kv *KVServer) cache(clientID int64, reply any) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	kv.lastReply[clientID] = reply
 
 }
 
 func (kv *KVServer) cacheApplyResult(clientID int64, res any) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	kv.lastApply[clientID] = res
 }
 
 func (kv *KVServer) getApplyResultFromCache(cliendID int64) any {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	if res, ok := kv.lastApply[cliendID]; ok {
 		return res
 	}
@@ -92,8 +91,6 @@ func (kv *KVServer) getApplyResultFromCache(cliendID int64) any {
 }
 
 func (kv *KVServer) getFromCache(clientID int64) any {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	if reply, ok := kv.lastReply[clientID]; ok {
 		return reply
 	}
@@ -101,15 +98,11 @@ func (kv *KVServer) getFromCache(clientID int64) any {
 }
 
 func (kv *KVServer) setWait(clientID int64) chan any {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	kv.wait[clientID] = make(chan any)
 	return kv.wait[clientID]
 }
 
 func (kv *KVServer) getWait(clientID int64) chan any { // called by process engine
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	if w, ok := kv.wait[clientID]; ok {
 		delete(kv.wait, clientID)
 		return w
@@ -118,7 +111,9 @@ func (kv *KVServer) getWait(clientID int64) chan any { // called by process engi
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	kv.mu.Lock()
 	if prevReply, ok := kv.getFromCache(args.ClientID).(*GetReply); ok && prevReply != nil && prevReply.ID == args.ID {
+		kv.mu.Unlock()
 		*reply = *prevReply
 		return
 	}
@@ -130,41 +125,51 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		ClientID: args.ClientID,
 	}
 
-	_, _, isLeader := kv.rf.Start(op)
+	var res any
+	index, _, isLeader := kv.rf.Start(op)
+	DPrintf("KVServer.Get: s%d op=%+v cmd_index=%d", kv.me, op, index)
 	if !isLeader {
+		kv.mu.Unlock()
 		reply.Err = ErrWrongLeader
 		return
 	}
-
+	kv.cmdToOp[index] = op
 	wait := kv.setWait(args.ClientID)
+	kv.mu.Unlock()
+
 	res, ok := <-wait
 	close(wait)
 	if !ok {
 		panic("Get: can't close a channel that client waits for")
 	}
 
+	reply.ID = args.ClientID
 	if err, ok := res.(error); ok {
 		if errors.Is(err, KeyNotFoundErr) {
 			reply.Value = ""
 			reply.Err = ErrNoKey
+		} else if errors.Is(err, CmdOverrideByNewLeaderError) {
+			reply.Err = ErrWrongLeader
 		} else {
 			panic("Get: unknow error ")
 		}
 	} else {
 		reply.Value, ok = res.(string)
+		reply.Err = OK
 		if !ok {
 			panic("Get:unexpected type; should be string value")
 		}
+
+		kv.mu.Lock()
+		kv.cache(args.ClientID, reply)
+		kv.mu.Unlock()
 	}
-
-	reply.Err = OK
-	reply.ID = args.ClientID
-
-	kv.cache(args.ClientID, reply)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	kv.mu.Lock()
 	if prevReply, ok := kv.getFromCache(args.ClientID).(*PutAppendReply); ok && prevReply != nil && prevReply.ID == args.ID {
+		kv.mu.Unlock()
 		*reply = *prevReply
 		return
 	}
@@ -177,24 +182,39 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		ClientID: args.ClientID,
 	}
 
-	wait := kv.setWait(args.ClientID)
-
-	_, _, isLeader := kv.rf.Start(op)
+	var res any
+	index, _, isLeader := kv.rf.Start(op)
+	DPrintf("KVServer.PutAppend s%d op=%+v cmd_index=%d", kv.me, op, index)
 	if !isLeader {
+		kv.mu.Unlock()
 		reply.Err = ErrWrongLeader
 		return
 	}
 
-	_, ok := <-wait
+	kv.cmdToOp[index] = op
+	wait := kv.setWait(args.ClientID)
+	kv.mu.Unlock()
+
+	processRes, ok := <-wait
 	close(wait)
 
 	if !ok {
 		panic("PutAppend: can't close a channel that client waits for")
 	}
+	res = processRes
 
 	reply.ID = op.ID
-	reply.Err = OK
-	kv.cache(args.ClientID, reply)
+	if err, ok := res.(error); ok {
+		if errors.Is(err, CmdOverrideByNewLeaderError) {
+			reply.Err = ErrWrongLeader
+		}
+	} else {
+		reply.Err = OK
+
+		kv.mu.Lock()
+		kv.cache(args.ClientID, reply)
+		kv.mu.Unlock()
+	}
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -222,14 +242,31 @@ func (kv *KVServer) process() {
 		if msg.CommandValid {
 			op := msg.Command.(Op)
 
-			if reqID, ok := kv.lastReqID[op.ClientID]; ok && reqID >= op.ClientID {
+			DPrintf("s%d process apply_msg=%+v", kv.me, msg)
+
+			kv.mu.Lock()
+			if reqID, ok := kv.lastReqID[op.ClientID]; ok && reqID >= op.ID {
 				// duplicate commands
 				wait := kv.getWait(op.ClientID)
 				if wait != nil {
-					wait <- kv.getApplyResultFromCache(op.ClientID)
+					res := kv.getApplyResultFromCache(op.ClientID)
+					wait <- res
 				}
+				kv.mu.Unlock()
 				continue
 			}
+
+			// Detect election because index is taken by a different command.
+			if waitOp, ok := kv.cmdToOp[msg.CommandIndex]; ok && waitOp.ID != op.ID {
+				wait := kv.getWait(waitOp.ClientID)
+				if wait != nil {
+					// how to tell client about election and ask client to retry?
+					wait <- CmdOverrideByNewLeaderError
+				}
+				kv.mu.Unlock()
+				continue
+			}
+
 			kv.lastReqID[op.ClientID] = op.ID
 			var res any
 			switch op.Name {
@@ -257,6 +294,8 @@ func (kv *KVServer) process() {
 			kv.cacheApplyResult(op.ClientID, res)
 
 			wait := kv.getWait(op.ClientID)
+			kv.mu.Unlock()
+
 			if wait != nil {
 				wait <- res
 			}

@@ -2,6 +2,7 @@ package kvraft
 
 import (
 	"crypto/rand"
+	"fmt"
 	"log"
 	"math/big"
 	"sync/atomic"
@@ -15,11 +16,17 @@ type Clerk struct {
 	// You will have to modify this struct.
 	ID         int64
 	lastLeader int
-	count      atomic.Int64
 }
 
+var counter atomic.Int64
+
+const MAX_ID int64 = (1 << 63) - 1 // 9223372036854775807
+
 func (ck *Clerk) NextReqID() int64 {
-	return ck.count.Add(1)
+	// expected:
+	// sign bit   0              1              0 ...
+	//  value     0 -> MAX_ID -> 0 -> MAX_ID -> 0 ...
+	return counter.Add(1) & MAX_ID
 }
 
 func nrand() int64 {
@@ -57,24 +64,36 @@ func (ck *Clerk) Get(key string) string {
 		for i := 0; i < len(ck.servers); i++ {
 			server := (ck.lastLeader + i) % len(ck.servers)
 			var reply GetReply
+			msg := fmt.Sprintf("ck.Get: client=%d s%d request=%d args=%+v; ", ck.ID, server, args.ID, args)
+			log.Println(msg)
 			ok := ck.servers[server].Call("KVServer.Get", &args, &reply)
 			if ok && reply.Err == OK {
 				ck.lastLeader = server
-				DPrintf("client to s%d args=%+v reply=%+v", i, args, reply)
+				msg += fmt.Sprintf("reply=%+v; ", reply)
+				DPrintf(msg)
 				return reply.Value
 			}
 
 			if ok && reply.Err == ErrNoKey {
+				msg += ErrNoKey
+				DPrintf(msg)
 				ck.lastLeader = server
 				return ""
 			}
 
-			if !ok || ok && (reply.Err == ErrWrongLeader) {
+			if ok && (reply.Err == ErrWrongLeader) {
 				// try the next kv server
+				msg += ErrWrongLeader
+				DPrintf(msg)
 				continue
 			}
 
-			log.Panicf("unknow reply state; args=%+v reply=%+v", args, reply)
+			if !ok {
+				msg += "rpc not receive reply from server"
+				DPrintf(msg)
+				continue
+			}
+
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -100,19 +119,28 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		for i := 0; i < len(ck.servers); i++ {
 			server := (ck.lastLeader + i) % len(ck.servers)
 			var reply PutAppendReply
-
+			msg := fmt.Sprintf("ck.PutAppend: client=%d s%d request=%d args=%+v; ", ck.ID, server, args.ID, args)
+			log.Println(msg)
 			ok := ck.servers[server].Call("KVServer.PutAppend", &args, &reply)
 			if ok && reply.Err == OK {
 				ck.lastLeader = server
-				DPrintf("client to s%d args=%+v reply=%+v", i, args, reply)
+				msg += fmt.Sprintf("reply=%+v; ", reply)
+				DPrintf(msg)
 				return
 			}
 
-			if !ok || ok && (reply.Err == ErrWrongLeader) {
+			if ok && (reply.Err == ErrWrongLeader) {
+				msg += ErrWrongLeader
+				DPrintf(msg)
 				continue
 			}
 
-			log.Panicf("unknow reply state; args=%+v reply=%+v", args, reply)
+			if !ok {
+				msg += "rpc not receive reply from server"
+				DPrintf(msg)
+				continue
+			}
+
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
