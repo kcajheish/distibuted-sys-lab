@@ -393,8 +393,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	Debug(dLog, "AppendEntries s%d args=%+v reply=%+v state=%s", rf.me, args, reply, rf.StateToString())
-
 	currentIndex := args.PrevLogIndex + 1
 	for i, j := currentIndex, 0; i < currentIndex+len(args.Entries); i, j = i+1, j+1 {
 		if i <= rf.Size() {
@@ -416,12 +414,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if prevCommit != rf.commitIndex {
-		Debug(dLog, "s%d commit from %d to %d; ", rf.me, prevCommit+1, rf.commitIndex)
 		go rf.ApplyCommand()
 	}
 
 	reply.Success = true
 	reply.CurrentTerm = rf.CurrentTerm
+
+	Debug(dLog, "AppendEntries s%d args=%+v reply=%+v state=%s", rf.me, args, reply, rf.StateToString())
 
 }
 
@@ -909,6 +908,7 @@ func (rf *Raft) updateCommitIndex() {
 func (rf *Raft) ApplyCommand() {
 	rf.mu.Lock()
 	msgs := []ApplyMsg{}
+	Debug(dLog, "s%d commit from %d to %d; ", rf.me, rf.lastApplied+1, rf.commitIndex)
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 		msg := ApplyMsg{
 			CommandValid: true,
