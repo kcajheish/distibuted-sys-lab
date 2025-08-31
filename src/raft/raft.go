@@ -394,18 +394,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	currentIndex := args.PrevLogIndex + 1
-	for i, j := currentIndex, 0; i < currentIndex+len(args.Entries); i, j = i+1, j+1 {
-		if i <= rf.Size() {
-			index := rf.Index(i)
-			if rf.LogAt(i).Term != args.Entries[j].Term {
-				rf.Logs = rf.Logs[:index+1]
-			}
-			rf.Logs[index] = args.Entries[j]
-		} else {
-			rf.Logs = append(rf.Logs, args.Entries[j])
-		}
-		changed = true
-	}
+	rf.Logs = rf.Logs[:rf.Index(currentIndex)]
+	rf.Logs = append(rf.Logs, args.Entries...)
+	changed = true
 
 	lastIndex := rf.Size()
 	prevCommit := rf.commitIndex
@@ -650,6 +641,7 @@ func (rf *Raft) heartbeats() {
 		for rf.status != LEADER {
 			rf.leadCond.Wait()
 		}
+
 		wait := make(chan any, len(rf.peers))
 		rf.round += 1
 		rf.busy = true
@@ -877,6 +869,8 @@ func (rf *Raft) updateCommitIndex() {
 	if rf.status != LEADER {
 		return
 	}
+
+	// log.Printf("match=%+v max_index=%d old=%d\n", rf.matchIndex, rf.Size(), rf.commitIndex)
 
 	old := rf.commitIndex
 	for index := rf.Size(); index > old; index-- {
