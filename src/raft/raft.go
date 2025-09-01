@@ -77,6 +77,13 @@ type Raft struct {
 	status      int // Leader, Candidate, Follower
 	Persistent
 	SnapshotMeta
+
+	leadCond   *sync.Cond
+	followCond *sync.Cond
+
+	fire  chan any
+	round int
+	busy  bool
 }
 
 type Persistent struct {
@@ -102,6 +109,9 @@ const (
 )
 
 func (rf *Raft) StateToString() string {
+	if !DEBUG {
+		return ""
+	}
 	arr := []string{}
 	for i, log := range rf.Logs {
 		if i == 0 {
@@ -130,9 +140,13 @@ func (rf *Raft) StatusToString(status int) string {
 
 const NO_LEADER = -1
 
-const BATCH_SIZE = 50
+const BATCH_SIZE = 200
 
-const MAX_LOGS = 300
+const MAX_LOGS = 1000
+
+// The long delay could be as long as 7 ms.
+// A short delay is within 100 ms.
+const RPC_TIMEOUT = 500 * time.Millisecond
 
 // return currentTerm and whether this server
 // believes it is the leader.
@@ -254,8 +268,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	if rf.CurrentTerm < args.Term {
-		rf.CurrentTerm = args.Term
-		rf.status = FOLLOWER
+		rf.become(FOLLOWER, args.Term)
 		rf.VoteFor = NO_LEADER
 		return
 	}
@@ -287,9 +300,22 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 }
 
+func (rf *Raft) waitUntilTimeout(out chan bool, timeout time.Duration) bool {
+	res := false
+	select {
+	case <-time.After(timeout):
+	case res = <-out:
+	}
+	return res
+}
+
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
-	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
-	return ok
+	out := make(chan bool)
+	go func() {
+		out <- rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	}()
+
+	return rf.waitUntilTimeout(out, RPC_TIMEOUT)
 }
 
 type AppendEntriesArgs struct {
@@ -323,8 +349,13 @@ func getRandomTimeout() time.Time {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	defer rf.persist()
+	changed := false
+	defer func() {
+		if changed {
+			rf.persist()
+		}
+		rf.mu.Unlock()
+	}()
 
 	if rf.CurrentTerm > args.Term { // Follower spots a stale leader.
 		reply.CurrentTerm = rf.CurrentTerm
@@ -333,10 +364,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if rf.CurrentTerm < args.Term {
-		rf.CurrentTerm = args.Term
-		rf.status = FOLLOWER
+		rf.become(FOLLOWER, args.Term)
 		rf.VoteFor = NO_LEADER
 		reply.Success = false
+		changed = true
 		return
 	}
 
@@ -362,20 +393,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	Debug(dLog, "AppendEntries s%d args=%+v reply=%+v state=%s", rf.me, args, reply, rf.StateToString())
-
 	currentIndex := args.PrevLogIndex + 1
-	for i, j := currentIndex, 0; i < currentIndex+len(args.Entries); i, j = i+1, j+1 {
-		if i <= rf.Size() {
-			index := rf.Index(i)
-			if rf.LogAt(i).Term != args.Entries[j].Term {
-				rf.Logs = rf.Logs[:index+1]
-			}
-			rf.Logs[index] = args.Entries[j]
-		} else {
-			rf.Logs = append(rf.Logs, args.Entries[j])
-		}
-	}
+	rf.Logs = rf.Logs[:rf.Index(currentIndex)]
+	rf.Logs = append(rf.Logs, args.Entries...)
+	changed = true
 
 	lastIndex := rf.Size()
 	prevCommit := rf.commitIndex
@@ -384,12 +405,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if prevCommit != rf.commitIndex {
-		Debug(dLog, "s%d commit from %d to %d; ", rf.me, prevCommit+1, rf.commitIndex)
 		go rf.ApplyCommand()
 	}
 
 	reply.Success = true
 	reply.CurrentTerm = rf.CurrentTerm
+
+	Debug(dLog, "AppendEntries s%d args=%+v reply=%+v state=%s", rf.me, args, reply, rf.StateToString())
 
 }
 
@@ -408,8 +430,11 @@ func (rf *Raft) FirstEntry(j int) int {
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
+	out := make(chan bool)
+	go func() {
+		out <- rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	}()
+	return rf.waitUntilTimeout(out, RPC_TIMEOUT)
 }
 
 // example RequestVote RPC arguments structure.
@@ -434,8 +459,13 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	defer rf.persist()
+	changed := false
+	defer func() {
+		if changed {
+			rf.persist()
+		}
+		rf.mu.Unlock()
+	}()
 
 	reply.Term = rf.CurrentTerm
 	if rf.CurrentTerm > args.Term {
@@ -445,9 +475,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if rf.CurrentTerm < args.Term {
-		rf.CurrentTerm = args.Term
-		rf.status = FOLLOWER
+		rf.become(FOLLOWER, args.Term)
 		rf.VoteFor = NO_LEADER
+		changed = true
 	}
 
 	lastTerm := -1
@@ -471,11 +501,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.status == LEADER {
 			Debug(dInfo, "AppendEntries: s%d becomes follower", rf.me)
 		}
-		rf.status = FOLLOWER
+		rf.become(FOLLOWER, rf.CurrentTerm)
 		rf.VoteFor = args.CandidateId
 		reply.VoteGranted = true
 		reply.Term = rf.CurrentTerm
 		rf.timeout = getRandomTimeout()
+		changed = true
 		return
 	}
 
@@ -512,7 +543,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	return rf.peers[server].Call("Raft.RequestVote", args, reply)
+	out := make(chan bool)
+	go func() {
+		out <- rf.peers[server].Call("Raft.RequestVote", args, reply)
+	}()
+	return rf.waitUntilTimeout(out, RPC_TIMEOUT)
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -543,8 +578,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) { // index, term, is
 		rf.Logs = append(rf.Logs, entry)
 		rf.persist()
 		Debug(dClient, "s%d receives cmd=%+v at index=%d\n", rf.me, command, index)
+		if !rf.busy {
+			go func() {
+				rf.fire <- nil
+			}()
+		}
 	}
-
 	return index, term, isLeader
 }
 
@@ -585,16 +624,43 @@ func (rf *Raft) checkState(expectedTerm int, expectedStatus int) error {
 	return errors.New(errMsg)
 }
 
+func (rf *Raft) become(status int, term int) {
+	rf.status = status
+	rf.CurrentTerm = term
+	switch rf.status {
+	case LEADER:
+		rf.leadCond.Signal()
+	case FOLLOWER:
+		rf.followCond.Signal()
+	}
+}
+
 func (rf *Raft) heartbeats() {
 	for !rf.killed() {
 		rf.mu.Lock()
+		for rf.status != LEADER {
+			rf.leadCond.Wait()
+		}
+
+		wait := make(chan any, len(rf.peers))
+		rf.round += 1
+		rf.busy = true
+		rf.drain(rf.fire)
+		go func() {
+			round := rf.round
+			n := 0
+			size := len(rf.peers) - 1
+			for n < size {
+				<-wait
+				n += 1
+			}
+			if round == rf.round {
+				rf.busy = false
+			}
+		}()
 		for i := 0; i < len(rf.peers); i++ {
 			if i == rf.me {
 				continue
-			}
-
-			if rf.status != LEADER {
-				break
 			}
 
 			if rf.LastIncludedIndex > 0 && rf.LastIncludedIndex >= rf.nextIndex[i] {
@@ -607,8 +673,8 @@ func (rf *Raft) heartbeats() {
 					Data:              rf.persister.ReadSnapshot(),
 				}
 				reply := InstallSnapshotReply{}
-				go func(i int, args InstallSnapshotArgs, reply InstallSnapshotReply) {
-					if rf.sendInstallSnapshot(i, &args, &reply) {
+				go func(i int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+					if rf.sendInstallSnapshot(i, args, reply) {
 						rf.mu.Lock()
 						defer rf.mu.Unlock()
 
@@ -620,9 +686,8 @@ func (rf *Raft) heartbeats() {
 						// Follower's snapshot index is larger.
 						// This leader might be stale.
 						if reply.Term > rf.CurrentTerm {
-							rf.CurrentTerm = reply.Term
+							rf.become(FOLLOWER, reply.Term)
 							rf.VoteFor = NO_LEADER
-							rf.status = FOLLOWER
 							rf.persist()
 							Debug(dLeader, "Stale leader s%d becomes follower", rf.me)
 							return
@@ -634,13 +699,10 @@ func (rf *Raft) heartbeats() {
 						rf.nextIndex[i] = args.LastIncludedIndex + 1
 						rf.updateCommitIndex()
 					}
-				}(i, args, reply)
+					wait <- nil
+				}(i, &args, &reply)
 
 			} else {
-
-				// if rf.nextIndex[i] <= rf.LastIncludedIndex {
-				// 	log.Panicf("leader forget to install snapshot on a lagging follower")
-				// }
 
 				args := AppendEntriesArgs{
 					Term:         rf.CurrentTerm,
@@ -660,10 +722,11 @@ func (rf *Raft) heartbeats() {
 					args.PrevLogTerm = rf.LogAt(args.PrevLogIndex).Term
 				}
 				if logs != nil {
-					args.Entries = append(args.Entries, logs...)
+					// args.Entries = append(args.Entries, logs...)
+					args.Entries = logs
 				}
-				go func(i int, args AppendEntriesArgs, reply AppendEntriesReply) {
-					if rf.sendAppendEntries(i, &args, &reply) {
+				go func(i int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+					if rf.sendAppendEntries(i, args, reply) {
 						rf.mu.Lock()
 						defer rf.mu.Unlock()
 
@@ -675,9 +738,8 @@ func (rf *Raft) heartbeats() {
 						}
 
 						if !reply.Success && reply.CurrentTerm > rf.CurrentTerm {
-							rf.CurrentTerm = reply.CurrentTerm
+							rf.become(FOLLOWER, reply.CurrentTerm)
 							rf.VoteFor = NO_LEADER
-							rf.status = FOLLOWER
 							rf.persist()
 							Debug(dLeader, "Stale leader s%d becomes follower", rf.me)
 							return
@@ -695,12 +757,26 @@ func (rf *Raft) heartbeats() {
 						}
 
 					}
-				}(i, args, reply)
+					wait <- nil
+				}(i, &args, &reply)
 			}
 
 		}
 		rf.mu.Unlock()
-		time.Sleep(heartbeatInterval)
+		select {
+		case <-time.After(heartbeatInterval):
+		case <-rf.fire:
+		}
+	}
+}
+
+func (rf *Raft) drain(ch chan any) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
 	}
 }
 
@@ -738,7 +814,7 @@ func (rf *Raft) getLogsInBatch(from int, size int) []LogEntry {
 	return rf.Logs[from:end]
 }
 
-func (rf *Raft) logMatching(reply AppendEntriesReply, server int, index int, size int) {
+func (rf *Raft) logMatching(reply *AppendEntriesReply, server int, index int, size int) {
 	// Avoid duplicate rpc call.
 	// Make it idempotent.
 	// index: previous log index
@@ -794,8 +870,10 @@ func (rf *Raft) updateCommitIndex() {
 		return
 	}
 
+	// log.Printf("match=%+v max_index=%d old=%d\n", rf.matchIndex, rf.Size(), rf.commitIndex)
+
 	old := rf.commitIndex
-	for index := old + 1; index <= rf.Size(); index++ {
+	for index := rf.Size(); index > old; index-- {
 		if rf.LogAt(index).Term != rf.CurrentTerm {
 			continue
 		}
@@ -811,6 +889,7 @@ func (rf *Raft) updateCommitIndex() {
 
 		if count >= rf.Majority() {
 			rf.commitIndex = index
+			break
 		}
 	}
 
@@ -823,6 +902,7 @@ func (rf *Raft) updateCommitIndex() {
 func (rf *Raft) ApplyCommand() {
 	rf.mu.Lock()
 	msgs := []ApplyMsg{}
+	Debug(dLog, "s%d commit from %d to %d; ", rf.me, rf.lastApplied+1, rf.commitIndex)
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 		msg := ApplyMsg{
 			CommandValid: true,
@@ -895,8 +975,7 @@ func (rf *Raft) AskVote(ctx context.Context, wg *sync.WaitGroup, server int, can
 		Debug(dVote, "s%d not a candidate anymore now %s ; cancel vote", rf.me, errMsg)
 		out <- -1
 	} else if reply.Term > rf.CurrentTerm {
-		rf.CurrentTerm = reply.Term
-		rf.status = FOLLOWER
+		rf.become(FOLLOWER, reply.Term)
 		out <- -1
 	} else if reply.VoteGranted {
 		out <- 1
@@ -911,7 +990,10 @@ func (rf *Raft) AskVote(ctx context.Context, wg *sync.WaitGroup, server int, can
 func (rf *Raft) ticker() {
 	for !rf.killed() {
 		rf.mu.Lock()
-		if rf.status == FOLLOWER && rf.timeout.Before(time.Now()) {
+		for rf.status != FOLLOWER {
+			rf.followCond.Wait()
+		}
+		if rf.timeout.Before(time.Now()) {
 			rf.CurrentTerm += 1
 			rf.VoteFor = rf.me
 			rf.status = CANDIDATE
@@ -945,12 +1027,11 @@ func (rf *Raft) ticker() {
 						n += 1
 						votes += v
 						if votes >= rf.Majority() {
-							rf.status = LEADER
+							rf.become(LEADER, rf.CurrentTerm)
 							rf.resetIndex()
 							Debug(dLeader, "s%d wins election", rf.me)
 							run = false
 						} else if n-votes >= rf.Majority() {
-							rf.status = FOLLOWER
 							Debug(dLeader, "s%d lose election in term %d", rf.me, rf.CurrentTerm)
 							run = false
 						}
@@ -966,7 +1047,7 @@ func (rf *Raft) ticker() {
 			close(out)
 			rf.mu.Lock()
 			if rf.status != LEADER {
-				rf.status = FOLLOWER
+				rf.become(FOLLOWER, rf.CurrentTerm)
 				rf.VoteFor = NO_LEADER
 				Debug(dVote, "s%d loses election in term %d\n", rf.me, rf.CurrentTerm)
 			} else {
@@ -996,10 +1077,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	rf.status = FOLLOWER
+	rf.leadCond = sync.NewCond(&rf.mu)
+	rf.followCond = sync.NewCond(&rf.mu)
+	rf.become(FOLLOWER, 0)
 	rf.VoteFor = NO_LEADER
 	rf.timeout = getRandomTimeout()
 	rf.applyCh = applyCh
+	rf.fire = make(chan any)
+	rf.busy = false
 
 	// Your initialization code here (2A, 2B, 2C).
 	size := len(peers)
