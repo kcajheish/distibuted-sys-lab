@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"errors"
 	"log"
 	"sync"
@@ -56,14 +57,19 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-
-	store   map[string][]byte
-	wait    map[int64]WaitFor
-	cmdToOp map[int]Op
-
-	lastReqID map[int64]int64
+	Persistent
+	wait      map[int64]WaitFor
+	persister *raft.Persister
 	lastReply map[int64]any
 	lastApply map[int64]any
+}
+
+type Persistent struct {
+	store             map[string][]byte
+	cmdToOp           map[int]Op
+	lastReqID         map[int64]int64
+	LastSnapshotIndex int
+	LastCmdIndex      int
 }
 
 // A previous command can cancel client's wait earilier since the command arrives late.
@@ -247,6 +253,7 @@ func (kv *KVServer) killed() bool {
 func (kv *KVServer) process() {
 	for msg := range kv.applyCh {
 		if msg.CommandValid {
+			kv.LastCmdIndex = max(kv.LastCmdIndex, msg.CommandIndex)
 			op := msg.Command.(Op)
 
 			DPrintf("s%d process apply_msg=%+v", kv.me, msg)
@@ -312,6 +319,19 @@ func (kv *KVServer) process() {
 			kv.mu.Unlock()
 
 		}
+
+		if msg.SnapshotValid {
+			kv.mu.Lock()
+			buff := bytes.NewBuffer(msg.Snapshot)
+			decode := labgob.NewDecoder(buff)
+			var p Persistent
+			if err := decode.Decode(&p); err != nil {
+				DPrintf("s%d can't decode: snapshot_msg=%+v", kv.me, msg)
+			} else {
+				kv.Persistent = p
+			}
+			kv.mu.Unlock()
+		}
 	}
 	DPrintf("kv server %d stop receiving messages.", kv.me)
 }
@@ -341,6 +361,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.InitMap()
 
+	kv.persister = persister
+
 	go kv.process()
 
 	// When a server changes term, a new leader wins election.
@@ -361,6 +383,31 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 				}
 			}
 			term = nextTerm
+			kv.mu.Unlock()
+		}
+	}()
+
+	go func() {
+		if maxraftstate == -1 {
+			return
+		}
+
+		// How often to check?
+		// Frequency is around the heartbeat interval.
+		// If frequency is smaller, snapshot is up to date but cpu spends much time checking.
+		// If frequency is larger, cpu spends time doing useful stuff but snapshot could be stale.
+		duration := time.Duration(100 * time.Millisecond)
+		for !kv.killed() {
+			time.Sleep(duration)
+			kv.mu.Lock()
+			if kv.persister.RaftStateSize() > maxraftstate && kv.LastCmdIndex > kv.LastSnapshotIndex {
+				w := new(bytes.Buffer)
+				e := labgob.NewEncoder(w)
+				e.Encode(kv.Persistent)
+				data := w.Bytes()
+				kv.rf.Snapshot(kv.LastCmdIndex, data)
+				kv.LastSnapshotIndex = kv.LastCmdIndex
+			}
 			kv.mu.Unlock()
 		}
 	}()
