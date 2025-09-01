@@ -12,7 +12,9 @@ import (
 	"6.824/raft"
 )
 
-const Debug = true
+const Debug = false
+
+var NewTermError = errors.New("new term")
 
 var KeyNotFoundErr = errors.New("no key")
 
@@ -56,7 +58,7 @@ type KVServer struct {
 	// Your definitions here.
 
 	store   map[string][]byte
-	wait    map[int64]chan any
+	wait    map[int64]WaitFor
 	cmdToOp map[int]Op
 
 	lastReqID map[int64]int64
@@ -64,9 +66,17 @@ type KVServer struct {
 	lastApply map[int64]any
 }
 
+// A previous command can cancel client's wait earilier since the command arrives late.
+// Therefore, be explicit about what request ID the client wait for.
+type WaitFor struct {
+	CommandIndex int
+	RequestID    int64
+	Done         chan any
+}
+
 func (kv *KVServer) InitMap() {
 	kv.store = make(map[string][]byte)
-	kv.wait = make(map[int64]chan any)
+	kv.wait = make(map[int64]WaitFor)
 	kv.cmdToOp = make(map[int]Op)
 	kv.lastReqID = make(map[int64]int64)
 	kv.lastReply = make(map[int64]any)
@@ -97,15 +107,19 @@ func (kv *KVServer) getFromCache(clientID int64) any {
 	return nil
 }
 
-func (kv *KVServer) setWait(clientID int64) chan any {
-	kv.wait[clientID] = make(chan any)
+func (kv *KVServer) setWait(clientID int64, reqID int64, cmdIndex int) WaitFor {
+	kv.wait[clientID] = WaitFor{
+		CommandIndex: cmdIndex,
+		RequestID:    reqID,
+		Done:         make(chan any),
+	}
 	return kv.wait[clientID]
 }
 
-func (kv *KVServer) getWait(clientID int64) chan any { // called by process engine
+func (kv *KVServer) getWait(clientID int64) *WaitFor { // called by process engine
 	if w, ok := kv.wait[clientID]; ok {
 		delete(kv.wait, clientID)
-		return w
+		return &w
 	}
 	return nil
 }
@@ -134,11 +148,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	kv.cmdToOp[index] = op
-	wait := kv.setWait(args.ClientID)
+	wait := kv.setWait(args.ClientID, args.ID, index)
 	kv.mu.Unlock()
 
-	res, ok := <-wait
-	close(wait)
+	res, ok := <-wait.Done
 	if !ok {
 		panic("Get: can't close a channel that client waits for")
 	}
@@ -149,6 +162,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Value = ""
 			reply.Err = ErrNoKey
 		} else if errors.Is(err, CmdOverrideByNewLeaderError) {
+			reply.Err = ErrWrongLeader
+		} else if errors.Is(err, NewTermError) {
 			reply.Err = ErrWrongLeader
 		} else {
 			panic("Get: unknow error ")
@@ -192,12 +207,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	kv.cmdToOp[index] = op
-	wait := kv.setWait(args.ClientID)
+	wait := kv.setWait(args.ClientID, args.ID, index)
 	kv.mu.Unlock()
 
-	processRes, ok := <-wait
-	close(wait)
-
+	processRes, ok := <-wait.Done
 	if !ok {
 		panic("PutAppend: can't close a channel that client waits for")
 	}
@@ -206,6 +219,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	reply.ID = op.ID
 	if err, ok := res.(error); ok {
 		if errors.Is(err, CmdOverrideByNewLeaderError) {
+			reply.Err = ErrWrongLeader
+		} else if errors.Is(err, NewTermError) {
 			reply.Err = ErrWrongLeader
 		}
 	} else {
@@ -247,10 +262,13 @@ func (kv *KVServer) process() {
 			kv.mu.Lock()
 			if reqID, ok := kv.lastReqID[op.ClientID]; ok && reqID >= op.ID {
 				// duplicate commands
-				wait := kv.getWait(op.ClientID)
-				if wait != nil {
+				if wait, ok := kv.wait[op.ClientID]; ok && wait.RequestID == op.ID {
+					delete(kv.wait, op.ClientID)
 					res := kv.getApplyResultFromCache(op.ClientID)
-					wait <- res
+					wait.Done <- res
+					// Only the producer of the channel knows when the stream ends.
+					// Therefore, close the done channel at producer-side
+					close(wait.Done)
 				}
 				kv.mu.Unlock()
 				continue
@@ -258,10 +276,11 @@ func (kv *KVServer) process() {
 
 			// Detect election because index is taken by a different command.
 			if waitOp, ok := kv.cmdToOp[msg.CommandIndex]; ok && waitOp.ID != op.ID {
-				wait := kv.getWait(waitOp.ClientID)
-				if wait != nil {
+				if wait, ok := kv.wait[op.ClientID]; ok && wait.RequestID == op.ID {
 					// how to tell client about election and ask client to retry?
-					wait <- CmdOverrideByNewLeaderError
+					delete(kv.wait, op.ClientID)
+					wait.Done <- CmdOverrideByNewLeaderError
+					close(wait.Done)
 				}
 				kv.mu.Unlock()
 				continue
@@ -293,12 +312,12 @@ func (kv *KVServer) process() {
 
 			kv.cacheApplyResult(op.ClientID, res)
 
-			wait := kv.getWait(op.ClientID)
-			kv.mu.Unlock()
-
-			if wait != nil {
-				wait <- res
+			if wait, ok := kv.wait[op.ClientID]; ok && wait.RequestID == op.ID {
+				delete(kv.wait, op.ClientID)
+				wait.Done <- res
+				close(wait.Done)
 			}
+			kv.mu.Unlock()
 
 		}
 	}
@@ -326,14 +345,33 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	// You may need initialization code here.
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.InitMap()
 
-	// You may need initialization code here.
 	go kv.process()
+
+	// When a server changes term, a new leader wins election.
+	// Ask the client to retry with the new leader.
+	// How often does it have to check term? Duration is at most election timeout.
+	go func() {
+		duration := 300 * time.Millisecond
+		term, _ := kv.rf.GetState()
+		for !kv.killed() {
+			time.Sleep(duration)
+			kv.mu.Lock()
+			nextTerm, _ := kv.rf.GetState()
+			if nextTerm != term {
+				for clientID, wait := range kv.wait {
+					delete(kv.wait, clientID)
+					wait.Done <- NewTermError
+					close(wait.Done)
+				}
+			}
+			term = nextTerm
+			kv.mu.Unlock()
+		}
+	}()
 
 	return kv
 }
