@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"errors"
 	"log"
 	"sync"
@@ -56,14 +57,18 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-
-	store   map[string][]byte
-	wait    map[int64]WaitFor
-	cmdToOp map[int]Op
-
-	lastReqID map[int64]int64
+	Persistent
+	wait      map[int64]WaitFor
+	persister *raft.Persister
 	lastReply map[int64]any
-	lastApply map[int64]any
+	cmdToOp   map[int]Op
+}
+
+type Persistent struct {
+	Store             map[string][]byte
+	LastReqID         map[int64]int64
+	LastSnapshotIndex int
+	LastCmdIndex      int
 }
 
 // A previous command can cancel client's wait earilier since the command arrives late.
@@ -75,33 +80,21 @@ type WaitFor struct {
 }
 
 func (kv *KVServer) InitMap() {
-	kv.store = make(map[string][]byte)
+	kv.Store = make(map[string][]byte)
 	kv.wait = make(map[int64]WaitFor)
 	kv.cmdToOp = make(map[int]Op)
-	kv.lastReqID = make(map[int64]int64)
+	kv.LastReqID = make(map[int64]int64)
 	kv.lastReply = make(map[int64]any)
-	kv.lastApply = make(map[int64]any)
 
 }
 
-func (kv *KVServer) cache(clientID int64, reply any) {
-	kv.lastReply[clientID] = reply
+func (kv *KVServer) cache(reqID int64, reply any) {
+	kv.lastReply[reqID] = reply
 
 }
 
-func (kv *KVServer) cacheApplyResult(clientID int64, res any) {
-	kv.lastApply[clientID] = res
-}
-
-func (kv *KVServer) getApplyResultFromCache(cliendID int64) any {
-	if res, ok := kv.lastApply[cliendID]; ok {
-		return res
-	}
-	return nil
-}
-
-func (kv *KVServer) getFromCache(clientID int64) any {
-	if reply, ok := kv.lastReply[clientID]; ok {
+func (kv *KVServer) getFromCache(reqID int64) any {
+	if reply, ok := kv.lastReply[reqID]; ok {
 		return reply
 	}
 	return nil
@@ -116,9 +109,14 @@ func (kv *KVServer) setWait(clientID int64, reqID int64, cmdIndex int) WaitFor {
 	return kv.wait[clientID]
 }
 
+func (kv *KVServer) clearCache(reqID int64) {
+	delete(kv.lastReply, reqID)
+}
+
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
-	if prevReply, ok := kv.getFromCache(args.ClientID).(*GetReply); ok && prevReply != nil && prevReply.ID == args.ID {
+	kv.clearCache(args.LastReqID)
+	if prevReply, ok := kv.getFromCache(args.ID).(*GetReply); ok && prevReply != nil {
 		kv.mu.Unlock()
 		*reply = *prevReply
 		return
@@ -148,7 +146,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		panic("Get: can't close a channel that client waits for")
 	}
 
-	reply.ID = args.ClientID
+	kv.mu.Lock()
+
+	reply.ID = op.ID
 	if err, ok := res.(error); ok {
 		if errors.Is(err, KeyNotFoundErr) {
 			reply.Value = ""
@@ -166,16 +166,16 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		if !ok {
 			panic("Get:unexpected type; should be string value")
 		}
-
-		kv.mu.Lock()
-		kv.cache(args.ClientID, reply)
-		kv.mu.Unlock()
+		kv.cache(args.ID, reply)
 	}
+	delete(kv.cmdToOp, index)
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
-	if prevReply, ok := kv.getFromCache(args.ClientID).(*PutAppendReply); ok && prevReply != nil && prevReply.ID == args.ID {
+	kv.clearCache(args.LastReqID)
+	if prevReply, ok := kv.getFromCache(args.ID).(*PutAppendReply); ok && prevReply != nil {
 		kv.mu.Unlock()
 		*reply = *prevReply
 		return
@@ -206,8 +206,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	if !ok {
 		panic("PutAppend: can't close a channel that client waits for")
 	}
+	kv.mu.Lock()
 	res = processRes
-
 	reply.ID = op.ID
 	if err, ok := res.(error); ok {
 		if errors.Is(err, CmdOverrideByNewLeaderError) {
@@ -217,11 +217,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		}
 	} else {
 		reply.Err = OK
-
-		kv.mu.Lock()
-		kv.cache(args.ClientID, reply)
-		kv.mu.Unlock()
+		kv.cache(args.ID, reply)
 	}
+	delete(kv.cmdToOp, index)
+	kv.mu.Unlock()
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -247,62 +246,74 @@ func (kv *KVServer) killed() bool {
 func (kv *KVServer) process() {
 	for msg := range kv.applyCh {
 		if msg.CommandValid {
-			op := msg.Command.(Op)
-
-			DPrintf("s%d process apply_msg=%+v", kv.me, msg)
-
 			kv.mu.Lock()
-			if reqID, ok := kv.lastReqID[op.ClientID]; ok && reqID >= op.ID {
-				// duplicate commands
-				if wait, ok := kv.wait[op.ClientID]; ok && wait.RequestID == op.ID {
-					delete(kv.wait, op.ClientID)
-					res := kv.getApplyResultFromCache(op.ClientID)
-					wait.Done <- res
-					// Only the producer of the channel knows when the stream ends.
-					// Therefore, close the done channel at producer-side
-					close(wait.Done)
-				}
+			if kv.LastCmdIndex+1 != msg.CommandIndex {
+				DPrintf("ignore out of order messages: last_cmd_index=%d command_index=%d", kv.LastCmdIndex, msg.CommandIndex)
 				kv.mu.Unlock()
 				continue
 			}
+			kv.LastCmdIndex = max(kv.LastCmdIndex, msg.CommandIndex)
+			op := msg.Command.(Op)
+			DPrintf("s%d process apply_msg=%+v", kv.me, msg)
 
 			// Detect election because index is taken by a different command.
+			// After new election, commands are not committed and discarded because new leader doesn't have it.
+			// Client will not receive apply messages for those discarded commands and wait forever.
+			// Thus, we have to detect whether a command index has served a different client request.
+			// If it does, inform waited client to retry the request.
 			if waitOp, ok := kv.cmdToOp[msg.CommandIndex]; ok && waitOp.ID != op.ID {
-				if wait, ok := kv.wait[op.ClientID]; ok && wait.RequestID == op.ID {
-					// how to tell client about election and ask client to retry?
+				if wait, ok := kv.wait[op.ClientID]; ok && waitOp.ID == wait.RequestID {
 					delete(kv.wait, op.ClientID)
 					wait.Done <- CmdOverrideByNewLeaderError
 					close(wait.Done)
 				}
-				kv.mu.Unlock()
-				continue
+			}
+			// Receive a duplicated command.
+			// After old leader partitions, new leader wins the election. The client sends the request again to the new leader.
+			// case a: old leader does not commit.
+			// case b: old leader commits and applies the message before client sends the request.
+			// case c: old leader commits and applies the message after client sends the request.
+			// To deal with case b and c, we have to cache results so that
+			// when the kv server receives duplicated command, it can still reply.
+			if reqID, ok := kv.LastReqID[op.ClientID]; ok && reqID >= op.ID {
+				if op.Name != GET {
+					if wait, ok := kv.wait[op.ClientID]; ok && wait.RequestID == op.ID {
+						delete(kv.wait, op.ClientID)
+						wait.Done <- struct{}{}
+
+						// Only the producer of the channel knows when the stream ends.
+						// Therefore, close the done channel at producer-side
+						close(wait.Done)
+					}
+					kv.mu.Unlock()
+					continue
+				}
+
 			}
 
-			kv.lastReqID[op.ClientID] = op.ID
+			kv.LastReqID[op.ClientID] = max(op.ID, kv.LastReqID[op.ClientID])
+
 			var res any
 			switch op.Name {
 			case GET:
-				if val, ok := kv.store[op.Key]; ok {
+				if val, ok := kv.Store[op.Key]; ok {
 					res = string(val)
 				} else {
 					res = KeyNotFoundErr
 				}
 			case PUT:
-				kv.store[op.Key] = []byte(op.Value)
+				kv.Store[op.Key] = []byte(op.Value)
 				res = struct{}{}
 			case APPEND:
-				if _, ok := kv.store[op.Key]; !ok {
-					kv.store[op.Key] = []byte(op.Value)
+				if _, ok := kv.Store[op.Key]; !ok {
+					kv.Store[op.Key] = []byte(op.Value)
 				} else {
-					kv.store[op.Key] = append(kv.store[op.Key], []byte(op.Value)...)
+					kv.Store[op.Key] = append(kv.Store[op.Key], []byte(op.Value)...)
 				}
 				res = struct{}{}
 			default:
 				panic("unknow operation")
-
 			}
-
-			kv.cacheApplyResult(op.ClientID, res)
 
 			if wait, ok := kv.wait[op.ClientID]; ok && wait.RequestID == op.ID {
 				delete(kv.wait, op.ClientID)
@@ -311,6 +322,19 @@ func (kv *KVServer) process() {
 			}
 			kv.mu.Unlock()
 
+		}
+
+		if msg.SnapshotValid {
+			kv.mu.Lock()
+			buff := bytes.NewBuffer(msg.Snapshot)
+			decode := labgob.NewDecoder(buff)
+			var p Persistent
+			if err := decode.Decode(&p); err != nil {
+				DPrintf("s%d can't decode: snapshot_msg=%+v err=%+v", kv.me, msg, err)
+			} else {
+				kv.Persistent = p
+			}
+			kv.mu.Unlock()
 		}
 	}
 	DPrintf("kv server %d stop receiving messages.", kv.me)
@@ -341,11 +365,34 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.InitMap()
 
+	kv.persister = persister
+
+	// Without registering struct for any type in Persistent,
+	// Encode returns "gob: type not registered for interface: struct {}"
+	// It leads to unexpected EOF during decode
+	// labgob.Register(KeyNotFoundErr)
+	// labgob.Register(struct{}{})
+
+	// restore from snapshot
+	if persister.SnapshotSize() > 0 {
+		buffer := bytes.NewBuffer(persister.ReadSnapshot())
+		d := labgob.NewDecoder(buffer)
+		var p Persistent
+		if err := d.Decode(&p); err != nil {
+			DPrintf("can't decode snapshot err=%+v", err)
+		} else {
+			kv.Persistent = p
+		}
+	}
+
 	go kv.process()
 
 	// When a server changes term, a new leader wins election.
 	// Ask the client to retry with the new leader.
 	// How often does it have to check term? Duration is at most election timeout.
+	// When a partition server rejoins, current leader will start a new term
+	// and the uncommitted command from previous term may never commit because raft can only commit command in current term.
+	// Thus, we have to ask the client to retry.
 	go func() {
 		duration := 300 * time.Millisecond
 		term, _ := kv.rf.GetState()
@@ -361,6 +408,33 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 				}
 			}
 			term = nextTerm
+			kv.mu.Unlock()
+		}
+	}()
+
+	go func() {
+		if kv.maxraftstate == -1 {
+			return
+		}
+
+		// How often to check?
+		// Frequency is around the heartbeat interval.
+		// If frequency is smaller, snapshot is up to date but cpu spends much time checking.
+		// If frequency is larger, cpu spends time doing useful stuff but snapshot could be stale.
+		duration := time.Duration(60 * time.Millisecond)
+		for !kv.killed() {
+			time.Sleep(duration)
+			kv.mu.Lock()
+			if kv.persister.RaftStateSize() >= kv.maxraftstate && kv.LastCmdIndex > kv.LastSnapshotIndex {
+				w := new(bytes.Buffer)
+				e := labgob.NewEncoder(w)
+				if err := e.Encode(kv.Persistent); err != nil {
+					DPrintf("%+v", err)
+				}
+				data := w.Bytes()
+				kv.rf.Snapshot(kv.LastCmdIndex, data)
+				kv.LastSnapshotIndex = kv.LastCmdIndex
+			}
 			kv.mu.Unlock()
 		}
 	}()

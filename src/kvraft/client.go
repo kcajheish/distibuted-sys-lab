@@ -15,6 +15,7 @@ type Clerk struct {
 	// You will have to modify this struct.
 	ID         int64
 	lastLeader int
+	lastReqId  int64
 }
 
 var counter atomic.Int64
@@ -54,10 +55,12 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
-	args.Key = key
-	args.ID = ck.NextReqID()
-	args.ClientID = ck.ID
+	args := GetArgs{
+		Key:       key,
+		ID:        ck.NextReqID(),
+		ClientID:  ck.ID,
+		LastReqID: ck.lastReqId,
+	}
 
 	for {
 		for i := 0; i < len(ck.servers); i++ {
@@ -69,6 +72,7 @@ func (ck *Clerk) Get(key string) string {
 				ck.lastLeader = server
 				msg += fmt.Sprintf("reply=%+v; ", reply)
 				DPrintf(msg)
+				ck.lastReqId = args.ID
 				return reply.Value
 			}
 
@@ -76,6 +80,7 @@ func (ck *Clerk) Get(key string) string {
 				msg += ErrNoKey
 				DPrintf(msg)
 				ck.lastLeader = server
+				ck.lastReqId = args.ID
 				return ""
 			}
 
@@ -106,12 +111,14 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{}
-	args.Op = op
-	args.Key = key
-	args.Value = value
-	args.ID = ck.NextReqID()
-	args.ClientID = ck.ID
+	args := PutAppendArgs{
+		Op:        op,
+		Key:       key,
+		Value:     value,
+		ID:        ck.NextReqID(),
+		ClientID:  ck.ID,
+		LastReqID: ck.lastReqId,
+	}
 
 	for {
 		for i := 0; i < len(ck.servers); i++ {
@@ -123,6 +130,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				ck.lastLeader = server
 				msg += fmt.Sprintf("reply=%+v; ", reply)
 				DPrintf(msg)
+				ck.lastReqId = args.ID
 				return
 			}
 

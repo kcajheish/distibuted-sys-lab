@@ -159,11 +159,8 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) SerializeRaftState() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(rf.CurrentTerm)
-	e.Encode(rf.VoteFor)
-	e.Encode(rf.Logs)
-	e.Encode(rf.LastIncludedIndex)
-	e.Encode(rf.LastIncludedTerm)
+	e.Encode(rf.Persistent)
+	e.Encode(rf.SnapshotMeta)
 	data := w.Bytes()
 	return data
 }
@@ -185,7 +182,7 @@ func (rf *Raft) readPersist(data []byte) {
 	d := labgob.NewDecoder(r)
 	var p Persistent
 	var s SnapshotMeta
-	if (d.Decode(&p.CurrentTerm) != nil) || (d.Decode(&p.VoteFor) != nil) || (d.Decode(&p.Logs) != nil) || (d.Decode(&s.LastIncludedIndex) != nil) || (d.Decode(&s.LastIncludedTerm) != nil) {
+	if (d.Decode(&p) != nil) || (d.Decode(&s) != nil) {
 		log.Fatalf("s%d can't read persist data", rf.me)
 	} else {
 		rf.Persistent = p
@@ -204,8 +201,15 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.commitIndex < index {
 		panic("can't snapshot entries that haven't been committed.")
+	}
+
+	if rf.LastIncludedIndex >= index {
+		Debug(dSnap, "snapshot is already taken")
+		return
 	}
 	newLogs := make([]LogEntry, 1, MAX_LOGS)
 	size := rf.Size() - index
@@ -219,12 +223,14 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		for i := 0; i < size; i++ {
 			newLogs = append(newLogs, rf.Logs[start+i])
 		}
-		rf.Logs = newLogs
+
 		Debug(dClient, "s%d snapshot_index=%d logs index %d -> %d", rf.me, index, index+1, rf.Size())
 	} else {
 		Debug(dClient, "s%d snapshot_index=%d logs index none", rf.me, index)
 
 	}
+
+	rf.Logs = newLogs
 
 	if snapshot == nil {
 		panic("client: snapshot can't be nil")
