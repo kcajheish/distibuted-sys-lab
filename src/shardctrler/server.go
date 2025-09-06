@@ -3,6 +3,8 @@ package shardctrler
 import (
 	"errors"
 	"log"
+	"slices"
+	"sort"
 	"sync"
 	"time"
 
@@ -59,7 +61,7 @@ const LEAVE Method = "Leave"
 
 const MOVE Method = "Move"
 
-const Query Method = "Query"
+const QUERY Method = "Query"
 
 const UNASSIGNED int = -1
 
@@ -85,11 +87,69 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
 }
 
+type entry struct {
+	gid   int
+	count int
+}
+
 // rebalance shard among available gids.
 func (sc *ShardCtrler) rebalance(config *Config) {
 	ngroup := len(config.Groups)
 	target := NShards / ngroup
-	rem := NShards * ngroup
+	rem := NShards % ngroup
+
+	entries := make([]entry, ngroup)
+	for gid, c := range config.Load {
+		e := entry{
+			gid:   gid,
+			count: c,
+		}
+		entries = append(entries, e)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+
+		return entries[i].count < entries[j].count
+	})
+
+	l, r := 0, ngroup-1
+	bound := ngroup - rem - 1
+	for i := 0; i < NShards; i++ {
+		if config.Shards[i] == UNASSIGNED {
+			t := target + l/bound
+			if entries[l].count >= t {
+				log.Panicf("gid should have less shard target=%d, entries=%+v", t, entries)
+			}
+
+			sc.assign(i, entries[l].gid, config)
+			entries[l].count += 1
+
+			if entries[l].count == t {
+				l += 1
+			}
+		}
+	}
+
+	for l < r {
+		ltarget := target + l/bound
+		rtarget := target + r/bound
+		if entries[l].count == ltarget {
+			l += 1
+		} else if entries[r].count == rtarget {
+			r -= 1
+		} else {
+			rgid := entries[r].gid
+			lgid := entries[l].gid
+			index := slices.Index(config.Shards[:], rgid)
+			if index == -1 {
+				log.Panicf("can't find gid=%d in shards=%+v", rgid, config.Shards)
+			}
+			sc.assign(index, lgid, config)
+			entries[r].count -= 1
+			entries[l].count += 1
+		}
+	}
+
 }
 
 func (sc *ShardCtrler) assign(shard int, gid int, config *Config) {
@@ -196,7 +256,7 @@ func (sr *ShardCtrler) apply(method Method, msg *raft.ApplyMsg) {
 		//
 	case MOVE:
 		//
-	case Query:
+	case QUERY:
 		//
 	default:
 		log.Panicf("unexpected method: %+v", method)
