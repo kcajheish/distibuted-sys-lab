@@ -23,12 +23,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 type ShardCtrler struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
-	cmdToOp map[int]Op        // command index -> op
-	wait    map[int64]WaitFor // client id -> waited command
+	mu         sync.Mutex
+	me         int
+	rf         *raft.Raft
+	applyCh    chan raft.ApplyMsg
+	cmdToOp    map[int]Op // command index -> op
+	replyCache map[int64]any
+	wait       map[int64]WaitFor // client id -> waited command
 	PersistentData
 	persister *raft.Persister
 }
@@ -72,19 +73,47 @@ var NewTermError = errors.New("new term")
 var CmdOverrideByNewLeaderError = errors.New("command override by new leader")
 
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
-	// Your code here.
+	if res, ok := sc.replyCache[args.ReqID]; ok {
+		if r, ok := res.(JoinReply); ok {
+			*reply = r
+			return
+		}
+	}
+
+	sc.replyCache[args.ReqID] = *reply
 }
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
-	// Your code here.
+	if res, ok := sc.replyCache[args.ReqID]; ok {
+		if r, ok := res.(LeaveReply); ok {
+			*reply = r
+			return
+		}
+	}
+
+	sc.replyCache[args.ReqID] = *reply
 }
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
-	// Your code here.
+	if res, ok := sc.replyCache[args.ReqID]; ok {
+		if r, ok := res.(MoveReply); ok {
+			*reply = r
+			return
+		}
+	}
+
+	sc.replyCache[args.ReqID] = *reply
 }
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
-	// Your code here.
+	if res, ok := sc.replyCache[args.ReqID]; ok {
+		if r, ok := res.(QueryReply); ok {
+			*reply = r
+			return
+		}
+	}
+
+	sc.replyCache[args.ReqID] = *reply
 }
 
 type entry struct {
