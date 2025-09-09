@@ -113,7 +113,7 @@ func (sc *ShardCtrler) rebalance(config *Config) {
 	})
 
 	l, r := 0, ngroup-1
-	bound := ngroup - rem - 1
+	bound := ngroup - rem
 	for i := 0; i < NShards; i++ {
 		if config.Shards[i] == UNASSIGNED {
 			t := target + l/bound
