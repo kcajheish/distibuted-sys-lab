@@ -49,9 +49,14 @@ type WaitFor struct {
 
 type Op struct {
 	Service  string
-	Method   string
+	Method   Method
 	ClientID int64
 	ID       int64
+	Servers  map[int][]string
+	Shard    int
+	Num      int
+	GIDS     []int
+	GID      int
 }
 
 type Method string
@@ -80,6 +85,36 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 		}
 	}
 
+	op := Op{
+		Service:  SERVICE,
+		Method:   JOIN,
+		ClientID: args.ClientID,
+		ID:       args.ReqID,
+		Servers:  args.Servers,
+	}
+	cmdIndex, _, isLeader := sc.rf.Start(op)
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+	sc.cmdToOp[cmdIndex] = op
+	wait := WaitFor{
+		index: cmdIndex,
+		reqID: args.ReqID,
+		done:  make(chan any),
+	}
+	sc.wait[args.ClientID] = wait
+	res := <-wait.done
+	if err, ok := res.(error); ok {
+		if err == NewTermError || err == CmdOverrideByNewLeaderError {
+			reply.WrongLeader = true
+			reply.Err = Err(err.Error())
+		} else {
+			log.Panicf("unrecognized errors: %+v", err)
+		}
+		return
+	}
+
 	sc.replyCache[args.ReqID] = *reply
 }
 
@@ -89,6 +124,36 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 			*reply = r
 			return
 		}
+	}
+
+	op := Op{
+		Service:  SERVICE,
+		Method:   LEAVE,
+		ClientID: args.ClientID,
+		ID:       args.ReqID,
+		GIDS:     args.GIDs,
+	}
+	cmdIndex, _, isLeader := sc.rf.Start(op)
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+	sc.cmdToOp[cmdIndex] = op
+	wait := WaitFor{
+		index: cmdIndex,
+		reqID: args.ReqID,
+		done:  make(chan any),
+	}
+	sc.wait[args.ClientID] = wait
+	res := <-wait.done
+	if err, ok := res.(error); ok {
+		if err == NewTermError || err == CmdOverrideByNewLeaderError {
+			reply.WrongLeader = true
+			reply.Err = Err(err.Error())
+		} else {
+			log.Panicf("unrecognized errors: %+v", err)
+		}
+		return
 	}
 
 	sc.replyCache[args.ReqID] = *reply
@@ -102,6 +167,37 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 		}
 	}
 
+	op := Op{
+		Service:  SERVICE,
+		Method:   MOVE,
+		ClientID: args.ClientID,
+		ID:       args.ReqID,
+		Shard:    args.Shard,
+		GID:      args.GID,
+	}
+	cmdIndex, _, isLeader := sc.rf.Start(op)
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+	sc.cmdToOp[cmdIndex] = op
+	wait := WaitFor{
+		index: cmdIndex,
+		reqID: args.ReqID,
+		done:  make(chan any),
+	}
+	sc.wait[args.ClientID] = wait
+	res := <-wait.done
+	if err, ok := res.(error); ok {
+		if err == NewTermError || err == CmdOverrideByNewLeaderError {
+			reply.WrongLeader = true
+			reply.Err = Err(err.Error())
+		} else {
+			log.Panicf("unrecognized errors: %+v", err)
+		}
+		return
+	}
+
 	sc.replyCache[args.ReqID] = *reply
 }
 
@@ -111,6 +207,43 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 			*reply = r
 			return
 		}
+	}
+
+	op := Op{
+		Service:  SERVICE,
+		Method:   QUERY,
+		ClientID: args.ClientID,
+		ID:       args.ReqID,
+		Num:      args.Num,
+	}
+	cmdIndex, _, isLeader := sc.rf.Start(op)
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+	sc.cmdToOp[cmdIndex] = op
+	wait := WaitFor{
+		index: cmdIndex,
+		reqID: args.ReqID,
+		done:  make(chan any),
+	}
+	sc.wait[args.ClientID] = wait
+
+	res := <-wait.done
+	if err, ok := res.(error); ok {
+		if err == NewTermError || err == CmdOverrideByNewLeaderError {
+			reply.WrongLeader = true
+			reply.Err = Err(err.Error())
+		} else {
+			log.Panicf("unrecognized errors: %+v", err)
+		}
+		return
+	}
+
+	if conf, ok := res.(Config); ok {
+		reply.Config = conf
+	} else {
+		log.Panicf("unexpected result from apply layer")
 	}
 
 	sc.replyCache[args.ReqID] = *reply
