@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"6.824/labgob"
@@ -32,6 +33,7 @@ type ShardCtrler struct {
 	wait       map[int64]WaitFor // client id -> waited command
 	PersistentData
 	persister *raft.Persister
+	dead      int32
 }
 
 type PersistentData struct {
@@ -395,11 +397,16 @@ func (sr *ShardCtrler) addConfig(config Config) {
 	sr.Configs = append(sr.Configs, config)
 }
 
+func (sc *ShardCtrler) killed() bool {
+	return atomic.LoadInt32(&sc.dead) == 1
+}
+
 // the tester calls Kill() when a ShardCtrler instance won't
 // be needed again. you are not required to do anything
 // in Kill(), but it might be convenient to (for example)
 // turn off debug output from this instance.
 func (sc *ShardCtrler) Kill() {
+	atomic.StoreInt32(&sc.dead, 1)
 	sc.rf.Kill()
 	// Your code here, if desired.
 }
@@ -432,7 +439,8 @@ func (sc *ShardCtrler) loadSnapshot() {}
 
 func (sc *ShardCtrler) takeSnapshot(interval time.Duration) {}
 
-func (sc *ShardCtrler) watchTerm(interval time.Duration) {}
+func (sc *ShardCtrler) watchTerm(interval time.Duration) {
+}
 
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
