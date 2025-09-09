@@ -37,8 +37,8 @@ type ShardCtrler struct {
 }
 
 type PersistentData struct {
-	LastReq          map[int]int64 // client id -> request id
-	Configs          []Config      // indexed by config num
+	LastReq          map[int64]int64 // client id -> request id
+	Configs          []Config        // indexed by config num
 	SnapshotIndex    int
 	LastCommandIndex int
 }
@@ -417,23 +417,89 @@ func (sc *ShardCtrler) Raft() *raft.Raft {
 }
 
 // apply messages to the state machine
-func (sr *ShardCtrler) apply(method Method, msg *raft.ApplyMsg) {
-	switch method {
+func (sc *ShardCtrler) apply(op *Op) any {
+	size := len(sc.Configs)
+	newConfig := sc.copy(&sc.Configs[size-1])
+	var res any
+	switch op.Method {
 	case JOIN:
-		//
+		for gid, servers := range op.Servers {
+			sc.AddGroup(gid, servers, &newConfig)
+		}
+		sc.rebalance(&newConfig)
+		res = struct{}{}
 	case LEAVE:
-		//
+		for _, gid := range op.GIDS {
+			sc.removeGroup(gid, &newConfig)
+		}
+		sc.rebalance(&newConfig)
+		res = struct{}{}
 	case MOVE:
-		//
+		sc.assign(op.Shard, op.GID, &newConfig)
+		res = struct{}{}
 	case QUERY:
-		//
+		if op.Num >= len(sc.Configs) {
+			log.Panicf("invalid config number")
+		}
+		res = sc.copy(&sc.Configs[op.Num])
 	default:
-		log.Panicf("unexpected method: %+v", method)
+		log.Panicf("unexpected method: %+v", op.Method)
 	}
+	return res
 }
 
 // Retrieve apply messages from apply channel and process it.
-func (sr *ShardCtrler) process() {}
+func (sc *ShardCtrler) process() {
+	for msg := range sc.applyCh {
+		if msg.CommandValid {
+			sc.mu.Lock()
+			if sc.LastCommandIndex+1 != msg.CommandIndex {
+				DPrintf("ignore out of order messages: last_cmd_index=%d command_index=%d", sc.LastCommandIndex, msg.CommandIndex)
+				sc.mu.Unlock()
+				continue
+			}
+			sc.LastCommandIndex = max(sc.LastCommandIndex, msg.CommandIndex)
+			op := msg.Command.(Op)
+			DPrintf("s%d process apply_msg=%+v", sc.me, msg)
+
+			if waitOp, ok := sc.cmdToOp[msg.CommandIndex]; ok && waitOp.ID != op.ID {
+				if wait, ok := sc.wait[op.ClientID]; ok && waitOp.ID == wait.reqID {
+					delete(sc.wait, op.ClientID)
+					wait.done <- CmdOverrideByNewLeaderError
+					close(wait.done)
+				}
+			}
+
+			if reqID, ok := sc.LastReq[op.ClientID]; ok && reqID >= op.ID {
+				if op.Method != QUERY {
+					if wait, ok := sc.wait[op.ClientID]; ok && wait.reqID == op.ID {
+						delete(sc.wait, op.ClientID)
+						wait.done <- struct{}{}
+
+						// Only the producer of the channel knows when the stream ends.
+						// Therefore, close the done channel at producer-side
+						close(wait.done)
+					}
+					sc.mu.Unlock()
+					continue
+				}
+
+			}
+
+			sc.LastReq[op.ClientID] = max(op.ID, sc.LastReq[op.ClientID])
+
+			res := sc.apply(&op)
+
+			if wait, ok := sc.wait[op.ClientID]; ok && wait.reqID == op.ID {
+				delete(sc.wait, op.ClientID)
+				wait.done <- res
+				close(wait.done)
+			}
+
+			sc.mu.Unlock()
+		}
+	}
+}
 
 func (sc *ShardCtrler) watchTerm(interval time.Duration) {
 	term, _ := sc.rf.GetState()
@@ -470,7 +536,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.persister = persister
 
 	// init data
-	sc.LastReq = make(map[int]int64)
+	sc.LastReq = make(map[int64]int64)
 	sc.cmdToOp = make(map[int]Op)
 	sc.SnapshotIndex = 0
 	sc.LastCommandIndex = 0
