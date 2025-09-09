@@ -435,11 +435,22 @@ func (sr *ShardCtrler) apply(method Method, msg *raft.ApplyMsg) {
 // Retrieve apply messages from apply channel and process it.
 func (sr *ShardCtrler) process() {}
 
-func (sc *ShardCtrler) loadSnapshot() {}
-
-func (sc *ShardCtrler) takeSnapshot(interval time.Duration) {}
-
 func (sc *ShardCtrler) watchTerm(interval time.Duration) {
+	term, _ := sc.rf.GetState()
+	for !sc.killed() {
+		time.Sleep(interval)
+		sc.mu.Lock()
+		nextTerm, _ := sc.rf.GetState()
+		if nextTerm != term {
+			for clientID, wait := range sc.wait {
+				delete(sc.wait, clientID)
+				wait.done <- NewTermError
+				close(wait.done)
+			}
+		}
+		term = nextTerm
+		sc.mu.Unlock()
+	}
 }
 
 // servers[] contains the ports of the set of
@@ -465,13 +476,11 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.LastCommandIndex = 0
 	sc.wait = make(map[int64]WaitFor)
 
-	// Install snapshot when the server restarts
-
 	// receive and process stream of apply messages from raft
+	go sc.process()
 
 	// watch out for change of term
-
-	// take snapshot periodically
+	go sc.watchTerm(time.Duration(300 * time.Millisecond))
 
 	return sc
 }
