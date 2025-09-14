@@ -917,12 +917,15 @@ func (rf *Raft) ApplyCommand() {
 		}
 		msgs = append(msgs, msg)
 	}
-	rf.lastApplied = rf.commitIndex
+
 	rf.mu.Unlock()
 
 	for _, m := range msgs {
 		rf.applyCh <- m
 	}
+	rf.mu.Lock()
+	rf.lastApplied = rf.commitIndex
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) ApplySnapshot(snapshot []byte, term int, index int) {
