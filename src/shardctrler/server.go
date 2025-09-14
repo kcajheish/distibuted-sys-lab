@@ -14,7 +14,7 @@ import (
 	"6.824/raft"
 )
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -325,7 +325,8 @@ func (sc *ShardCtrler) rebalance(config *Config) {
 	}
 
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].count <= entries[j].count
+		a, b := entries[i], entries[j]
+		return a.count < b.count || (a.count == b.count && a.gid < b.gid)
 	})
 
 	l, r := 0, ngroup-1
