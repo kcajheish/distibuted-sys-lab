@@ -14,7 +14,7 @@ import (
 	"6.824/raft"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -89,6 +89,8 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 		}
 	}
 
+	DPrintf("JOIN args=%+v", args)
+
 	op := Op{
 		Service:  SERVICE,
 		Method:   JOIN,
@@ -138,6 +140,8 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 			return
 		}
 	}
+
+	DPrintf("LEAVE args=%+v", args)
 
 	op := Op{
 		Service:  SERVICE,
@@ -303,7 +307,6 @@ func getTarget(ngroup, i int) int {
 
 // rebalance shard among available gids.
 func (sc *ShardCtrler) rebalance(config *Config) {
-	DPrintf("start rebalance")
 	ngroup := len(config.Groups)
 	if ngroup == 0 {
 		for s := 0; s < NShards; s++ {
@@ -311,8 +314,6 @@ func (sc *ShardCtrler) rebalance(config *Config) {
 		}
 		return
 	}
-	target := NShards / ngroup
-	rem := NShards % ngroup
 
 	entries := make([]entry, 0)
 	for gid, c := range config.Load {
@@ -352,8 +353,6 @@ func (sc *ShardCtrler) rebalance(config *Config) {
 	for l < r {
 		ltarget := getTarget(ngroup, l)
 		rtarget := getTarget(ngroup, r)
-		DPrintf("target=%d rem=%d", target, rem)
-		DPrintf("ngruop=%+v ltarget=%d, rtarget=%d, rcount=%d lcount=%d l=%d r=%d entries=%+v", ngroup, ltarget, rtarget, entries[r].count, entries[l].count, l, r, entries)
 		if entries[l].count == ltarget {
 			l += 1
 		} else if entries[r].count == rtarget {
@@ -477,6 +476,7 @@ func (sc *ShardCtrler) killed() bool {
 func (sc *ShardCtrler) Kill() {
 	atomic.StoreInt32(&sc.dead, 1)
 	sc.rf.Kill()
+	DPrintf("s%d kill", sc.me)
 	// Your code here, if desired.
 }
 
@@ -497,7 +497,7 @@ func (sc *ShardCtrler) apply(op *Op) any {
 		}
 		sc.rebalance(&newConfig)
 		sc.addConfig(newConfig)
-		DPrintf("JOIN new_config: %+v", sc.lastConfig())
+		DPrintf("JOIN new_config: %+v op=%+v", sc.lastConfig(), op)
 		res = struct{}{}
 	case LEAVE:
 		size := len(sc.Configs)
@@ -507,7 +507,7 @@ func (sc *ShardCtrler) apply(op *Op) any {
 		}
 		sc.rebalance(&newConfig)
 		sc.addConfig(newConfig)
-		DPrintf("LEAVE new_config=%+v", sc.lastConfig())
+		DPrintf("LEAVE new_config=%+v op=%+v", sc.lastConfig(), op)
 		res = struct{}{}
 	case MOVE:
 		size := len(sc.Configs)
@@ -534,12 +534,11 @@ func (sc *ShardCtrler) apply(op *Op) any {
 
 // Retrieve apply messages from apply channel and process it.
 func (sc *ShardCtrler) process() {
-	DPrintf("start processing")
 	for msg := range sc.applyCh {
 		if msg.CommandValid {
 			sc.mu.Lock()
 			if sc.LastCommandIndex+1 != msg.CommandIndex {
-				DPrintf("ignore out of order messages: last_cmd_index=%d command_index=%d", sc.LastCommandIndex, msg.CommandIndex)
+				DPrintf("s%d ignore out of order messages: last_cmd_index=%d command_index=%d", sc.me, sc.LastCommandIndex, msg.CommandIndex)
 				sc.mu.Unlock()
 				continue
 			}
@@ -609,6 +608,7 @@ func (sc *ShardCtrler) watchTerm(interval time.Duration) {
 // form the fault-tolerant shardctrler service.
 // me is the index of the current server in servers[].
 func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister) *ShardCtrler {
+	DPrintf("s%d starts", me)
 	sc := new(ShardCtrler)
 	sc.me = me
 
