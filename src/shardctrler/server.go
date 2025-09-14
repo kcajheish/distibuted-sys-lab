@@ -71,7 +71,7 @@ const MOVE Method = "Move"
 
 const QUERY Method = "Query"
 
-const UNASSIGNED int = -1
+const UNASSIGNED int = 0
 
 const SERVICE = "Shard Controller"
 
@@ -291,8 +291,19 @@ type entry struct {
 	count int
 }
 
+func getTarget(ngroup, i int) int {
+	rem := NShards % ngroup
+	bound := ngroup - rem
+	target := NShards / ngroup
+	if i >= bound {
+		target += 1
+	}
+	return target
+}
+
 // rebalance shard among available gids.
 func (sc *ShardCtrler) rebalance(config *Config) {
+	DPrintf("start rebalance")
 	ngroup := len(config.Groups)
 	if ngroup == 0 {
 		for s := 0; s < NShards; s++ {
@@ -313,17 +324,20 @@ func (sc *ShardCtrler) rebalance(config *Config) {
 	}
 
 	sort.Slice(entries, func(i, j int) bool {
-
-		return entries[i].count < entries[j].count
+		return entries[i].count <= entries[j].count
 	})
 
 	l, r := 0, ngroup-1
-	bound := ngroup - rem
 	for i := 0; i < NShards; i++ {
 		if config.Shards[i] == UNASSIGNED {
-			t := target + l/bound
-			if entries[l].count >= t {
-				log.Panicf("gid should have less shard target=%d, entries=%+v", t, entries)
+			t := getTarget(ngroup, l)
+			for entries[l].count == t {
+				l += 1
+				t = getTarget(ngroup, l)
+			}
+
+			if entries[l].count > t {
+				log.Panicf("gid should have less shard: l=%d, target=%d, entries=%+v, group=%+v", l, t, entries, ngroup)
 			}
 
 			sc.assign(i, entries[l].gid, config)
@@ -336,18 +350,23 @@ func (sc *ShardCtrler) rebalance(config *Config) {
 	}
 
 	for l < r {
-		ltarget := target + l/bound
-		rtarget := target + r/bound
+		ltarget := getTarget(ngroup, l)
+		rtarget := getTarget(ngroup, r)
+		DPrintf("target=%d rem=%d", target, rem)
+		DPrintf("ngruop=%+v ltarget=%d, rtarget=%d, rcount=%d lcount=%d l=%d r=%d entries=%+v", ngroup, ltarget, rtarget, entries[r].count, entries[l].count, l, r, entries)
 		if entries[l].count == ltarget {
 			l += 1
 		} else if entries[r].count == rtarget {
 			r -= 1
 		} else {
+			if entries[r].count < rtarget || entries[l].count > ltarget {
+				log.Panicf("ngruop=%+v ltarget=%d, rtarget=%d, rcount=%d lcount=%d l=%d r=%d entries=%+v", ngroup, ltarget, rtarget, entries[r].count, entries[l].count, l, r, entries)
+			}
 			rgid := entries[r].gid
 			lgid := entries[l].gid
 			index := slices.Index(config.Shards[:], rgid)
 			if index == -1 {
-				log.Panicf("can't find gid=%d in shards=%+v", rgid, config.Shards)
+				log.Panicf("can't find gid=%d in shards=%+v load=%+v", rgid, config.Shards, entries)
 			}
 			sc.assign(index, lgid, config)
 			entries[r].count -= 1
@@ -421,6 +440,7 @@ func (sc *ShardCtrler) copy(config *Config) Config {
 	for i := 0; i < NShards; i++ {
 		copyConfig.Shards[i] = config.Shards[i]
 	}
+
 	copyConfig.Groups = make(map[int][]string, len(config.Groups))
 	copyConfig.Load = make(map[int]int, len(config.Load))
 	for k, v := range config.Groups {
@@ -429,6 +449,7 @@ func (sc *ShardCtrler) copy(config *Config) Config {
 	for k, v := range config.Load {
 		copyConfig.Load[k] = v
 	}
+	DPrintf("%+v", copyConfig)
 	return copyConfig
 }
 
@@ -501,7 +522,10 @@ func (sc *ShardCtrler) apply(op *Op) any {
 		} else {
 			n = op.Num
 		}
-		res = sc.copy(&sc.Configs[n])
+		copyConfig := sc.copy(&sc.Configs[n])
+		copyConfig.Num = n
+		res = copyConfig
+		DPrintf("QUERY: op=%+v res=%+v configs=%+v", op, res, sc.Configs)
 	default:
 		log.Panicf("unexpected method: %+v", op.Method)
 	}
