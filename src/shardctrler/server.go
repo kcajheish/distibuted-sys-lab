@@ -80,9 +80,11 @@ var NewTermError = errors.New("new term")
 var CmdOverrideByNewLeaderError = errors.New("command override by new leader")
 
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
+	sc.mu.Lock()
 	if res, ok := sc.replyCache[args.ReqID]; ok {
 		if r, ok := res.(JoinReply); ok {
 			*reply = r
+			sc.mu.Unlock()
 			return
 		}
 	}
@@ -97,6 +99,7 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	cmdIndex, _, isLeader := sc.rf.Start(op)
 	if !isLeader {
 		reply.WrongLeader = true
+		sc.mu.Unlock()
 		return
 	}
 	sc.cmdToOp[cmdIndex] = op
@@ -106,7 +109,11 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 		done:  make(chan any),
 	}
 	sc.wait[args.ClientID] = wait
+	sc.mu.Unlock()
+
 	res := <-wait.done
+
+	sc.mu.Lock()
 	if err, ok := res.(error); ok {
 		if err == NewTermError || err == CmdOverrideByNewLeaderError {
 			reply.WrongLeader = true
@@ -114,16 +121,20 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 		} else {
 			log.Panicf("unrecognized errors: %+v", err)
 		}
+		sc.mu.Unlock()
 		return
 	}
 
 	sc.replyCache[args.ReqID] = *reply
+	sc.mu.Unlock()
 }
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
+	sc.mu.Lock()
 	if res, ok := sc.replyCache[args.ReqID]; ok {
 		if r, ok := res.(LeaveReply); ok {
 			*reply = r
+			sc.mu.Unlock()
 			return
 		}
 	}
@@ -138,6 +149,7 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	cmdIndex, _, isLeader := sc.rf.Start(op)
 	if !isLeader {
 		reply.WrongLeader = true
+		sc.mu.Unlock()
 		return
 	}
 	sc.cmdToOp[cmdIndex] = op
@@ -147,7 +159,11 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 		done:  make(chan any),
 	}
 	sc.wait[args.ClientID] = wait
+	sc.mu.Unlock()
+
 	res := <-wait.done
+
+	sc.mu.Lock()
 	if err, ok := res.(error); ok {
 		if err == NewTermError || err == CmdOverrideByNewLeaderError {
 			reply.WrongLeader = true
@@ -155,16 +171,20 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 		} else {
 			log.Panicf("unrecognized errors: %+v", err)
 		}
+		sc.mu.Unlock()
 		return
 	}
 
 	sc.replyCache[args.ReqID] = *reply
+	sc.mu.Unlock()
 }
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
+	sc.mu.Lock()
 	if res, ok := sc.replyCache[args.ReqID]; ok {
 		if r, ok := res.(MoveReply); ok {
 			*reply = r
+			sc.mu.Unlock()
 			return
 		}
 	}
@@ -180,6 +200,7 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	cmdIndex, _, isLeader := sc.rf.Start(op)
 	if !isLeader {
 		reply.WrongLeader = true
+		sc.mu.Unlock()
 		return
 	}
 	sc.cmdToOp[cmdIndex] = op
@@ -189,7 +210,11 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 		done:  make(chan any),
 	}
 	sc.wait[args.ClientID] = wait
+	sc.mu.Unlock()
+
 	res := <-wait.done
+
+	sc.mu.Lock()
 	if err, ok := res.(error); ok {
 		if err == NewTermError || err == CmdOverrideByNewLeaderError {
 			reply.WrongLeader = true
@@ -197,16 +222,20 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 		} else {
 			log.Panicf("unrecognized errors: %+v", err)
 		}
+		sc.mu.Unlock()
 		return
 	}
 
 	sc.replyCache[args.ReqID] = *reply
+	sc.mu.Unlock()
 }
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
+	sc.mu.Lock()
 	if res, ok := sc.replyCache[args.ReqID]; ok {
 		if r, ok := res.(QueryReply); ok {
 			*reply = r
+			sc.mu.Unlock()
 			return
 		}
 	}
@@ -221,6 +250,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	cmdIndex, _, isLeader := sc.rf.Start(op)
 	if !isLeader {
 		reply.WrongLeader = true
+		sc.mu.Unlock()
 		return
 	}
 	sc.cmdToOp[cmdIndex] = op
@@ -230,8 +260,11 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		done:  make(chan any),
 	}
 	sc.wait[args.ClientID] = wait
+	sc.mu.Unlock()
 
 	res := <-wait.done
+
+	sc.mu.Lock()
 	if err, ok := res.(error); ok {
 		if err == NewTermError || err == CmdOverrideByNewLeaderError {
 			reply.WrongLeader = true
@@ -239,6 +272,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		} else {
 			log.Panicf("unrecognized errors: %+v", err)
 		}
+		sc.mu.Unlock()
 		return
 	}
 
@@ -249,6 +283,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	}
 
 	sc.replyCache[args.ReqID] = *reply
+	sc.mu.Unlock()
 }
 
 type entry struct {
@@ -259,10 +294,16 @@ type entry struct {
 // rebalance shard among available gids.
 func (sc *ShardCtrler) rebalance(config *Config) {
 	ngroup := len(config.Groups)
+	if ngroup == 0 {
+		for s := 0; s < NShards; s++ {
+			sc.assign(s, UNASSIGNED, config)
+		}
+		return
+	}
 	target := NShards / ngroup
 	rem := NShards % ngroup
 
-	entries := make([]entry, ngroup)
+	entries := make([]entry, 0)
 	for gid, c := range config.Load {
 		e := entry{
 			gid:   gid,
@@ -318,11 +359,18 @@ func (sc *ShardCtrler) rebalance(config *Config) {
 
 func (sc *ShardCtrler) assign(shard int, gid int, config *Config) {
 	if config.Shards[shard] == UNASSIGNED && gid == UNASSIGNED {
-		log.Panicf("can't unassign a shard without gid")
+		return
+	}
+
+	if gid == UNASSIGNED {
+		prevGID := config.Shards[shard]
+		config.Shards[shard] = UNASSIGNED
+		config.Load[prevGID] -= 1
+		return
 	}
 
 	if _, ok := config.Groups[gid]; !ok {
-		log.Panicf("can't assign to the gid not in the group")
+		log.Panicf("can't assign to the gid not in the group: shard=%d, gid=%d, config=%+v", shard, gid, config)
 	}
 
 	if config.Shards[shard] == UNASSIGNED {
@@ -331,18 +379,12 @@ func (sc *ShardCtrler) assign(shard int, gid int, config *Config) {
 		return
 	}
 
-	if gid == UNASSIGNED {
-		config.Shards[shard] = gid
-		config.Load[gid] -= 1
-		return
-	}
-
-	prevGid := config.Shards[shard]
-	if prevGid == gid {
+	prevGID := config.Shards[shard]
+	if prevGID == gid {
 		DPrintf("already assign shard %d to the group %d; config=%+v", shard, gid, config)
 		return
 	}
-	config.Load[prevGid] -= 1
+	config.Load[prevGID] -= 1
 	config.Shards[shard] = gid
 	config.Load[gid] += 1
 
@@ -372,7 +414,7 @@ func (sc *ShardCtrler) AddGroup(gid int, servers []string, config *Config) {
 	config.Load[gid] = 0
 }
 
-func (sr *ShardCtrler) copy(config *Config) Config {
+func (sc *ShardCtrler) copy(config *Config) Config {
 	copyConfig := Config{}
 	copyConfig.Num = -1
 	copyConfig.Shards = [NShards]int{}
@@ -380,6 +422,7 @@ func (sr *ShardCtrler) copy(config *Config) Config {
 		copyConfig.Shards[i] = config.Shards[i]
 	}
 	copyConfig.Groups = make(map[int][]string, len(config.Groups))
+	copyConfig.Load = make(map[int]int, len(config.Load))
 	for k, v := range config.Groups {
 		copyConfig.Groups[k] = v
 	}
@@ -389,12 +432,17 @@ func (sr *ShardCtrler) copy(config *Config) Config {
 	return copyConfig
 }
 
-func (sr *ShardCtrler) addConfig(config Config) {
+func (sc *ShardCtrler) addConfig(config Config) {
 	if config.Num != -1 {
 		log.Panicf("can't assign the config twice.")
 	}
-	config.Num = len(sr.Configs)
-	sr.Configs = append(sr.Configs, config)
+	config.Num = len(sc.Configs)
+	sc.Configs = append(sc.Configs, config)
+}
+
+func (sc *ShardCtrler) lastConfig() Config {
+	n := len(sc.Configs)
+	return sc.Configs[n-1]
 }
 
 func (sc *ShardCtrler) killed() bool {
@@ -418,30 +466,42 @@ func (sc *ShardCtrler) Raft() *raft.Raft {
 
 // apply messages to the state machine
 func (sc *ShardCtrler) apply(op *Op) any {
-	size := len(sc.Configs)
-	newConfig := sc.copy(&sc.Configs[size-1])
 	var res any
 	switch op.Method {
 	case JOIN:
+		size := len(sc.Configs)
+		newConfig := sc.copy(&sc.Configs[size-1])
 		for gid, servers := range op.Servers {
 			sc.AddGroup(gid, servers, &newConfig)
 		}
 		sc.rebalance(&newConfig)
+		sc.addConfig(newConfig)
+		DPrintf("JOIN new_config: %+v", sc.lastConfig())
 		res = struct{}{}
 	case LEAVE:
+		size := len(sc.Configs)
+		newConfig := sc.copy(&sc.Configs[size-1])
 		for _, gid := range op.GIDS {
 			sc.removeGroup(gid, &newConfig)
 		}
 		sc.rebalance(&newConfig)
+		sc.addConfig(newConfig)
+		DPrintf("LEAVE new_config=%+v", sc.lastConfig())
 		res = struct{}{}
 	case MOVE:
+		size := len(sc.Configs)
+		newConfig := sc.copy(&sc.Configs[size-1])
 		sc.assign(op.Shard, op.GID, &newConfig)
+		sc.addConfig(newConfig)
 		res = struct{}{}
 	case QUERY:
-		if op.Num >= len(sc.Configs) {
-			log.Panicf("invalid config number")
+		var n int
+		if op.Num >= len(sc.Configs) || op.Num < 0 {
+			n = len(sc.Configs) - 1
+		} else {
+			n = op.Num
 		}
-		res = sc.copy(&sc.Configs[op.Num])
+		res = sc.copy(&sc.Configs[n])
 	default:
 		log.Panicf("unexpected method: %+v", op.Method)
 	}
@@ -450,6 +510,7 @@ func (sc *ShardCtrler) apply(op *Op) any {
 
 // Retrieve apply messages from apply channel and process it.
 func (sc *ShardCtrler) process() {
+	DPrintf("start processing")
 	for msg := range sc.applyCh {
 		if msg.CommandValid {
 			sc.mu.Lock()
@@ -528,7 +589,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.me = me
 
 	sc.Configs = make([]Config, 1)
-	sc.Configs[0].Groups = map[int][]string{}
+	sc.Configs[0].Groups = make(map[int][]string)
+	sc.Configs[0].Load = make(map[int]int)
+	sc.Configs[0].Shards = [NShards]int{}
+	sc.Configs[0].Num = 0
+	for s := 0; s < NShards; s++ {
+		sc.Configs[0].Shards[s] = UNASSIGNED
+	}
 
 	labgob.Register(Op{})
 	sc.applyCh = make(chan raft.ApplyMsg)
@@ -541,6 +608,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.SnapshotIndex = 0
 	sc.LastCommandIndex = 0
 	sc.wait = make(map[int64]WaitFor)
+	sc.replyCache = make(map[int64]any)
 
 	// receive and process stream of apply messages from raft
 	go sc.process()
